@@ -134,6 +134,34 @@ func TestPollParsesSnapshotFields(t *testing.T) {
 	}
 }
 
+// TestPollUsesWireConfigCustomPorts locks in that every exec/beacon probe
+// resolves its target address via WireConfig.ExecHTTP()/BeaconHTTP()
+// (default 8545/5052 on the zero value) rather than a hardcoded constant —
+// a target configured with custom ports must be probed on those exact
+// ports, and the old default ports must never be touched.
+func TestPollUsesWireConfigCustomPorts(t *testing.T) {
+	fe := newFakeExecutor().
+		script("http://127.0.0.1:9545", executor.Result{Stdout: `{"jsonrpc":"2.0","id":1,"result":"0x2a"}`}).
+		script("http://127.0.0.1:6052/eth/v1/node/syncing", executor.Result{
+			Stdout: `{"data":{"head_slot":"7","sync_distance":"0","is_syncing":false,"is_optimistic":false,"el_offline":false}}`,
+		})
+
+	m := New(Config{Exec: fe, Wire: catalog.WireConfig{ExecHTTPPort: 9545, BeaconHTTPPort: 6052}})
+	snap := m.poll(context.Background())
+
+	if snap.ExecHead != 0x2a {
+		t.Errorf("ExecHead = %#x, want 0x2a (probe should have hit the configured custom exec port)", snap.ExecHead)
+	}
+	if snap.BeaconSlot != 7 {
+		t.Errorf("BeaconSlot = %d, want 7 (probe should have hit the configured custom beacon port)", snap.BeaconSlot)
+	}
+	for _, c := range fe.calls {
+		if strings.Contains(c, "127.0.0.1:8545") || strings.Contains(c, "127.0.0.1:5052") {
+			t.Fatalf("probe used a default port instead of the configured custom port: %q", c)
+		}
+	}
+}
+
 func TestPollExecSyncingObjectMeansSyncingTrue(t *testing.T) {
 	fe := newFakeExecutor().
 		script("eth_syncing", executor.Result{Stdout: `{"jsonrpc":"2.0","id":1,"result":{"startingBlock":"0x0","currentBlock":"0x64","highestBlock":"0xc8"}}`})

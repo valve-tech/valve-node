@@ -31,14 +31,24 @@ import (
 // defaultInterval is used when Config.Interval is zero.
 const defaultInterval = 5 * time.Second
 
-// Target unit names/ports, matching internal/catalog/units.go and
-// internal/setup/steps.go's ports contract.
+// Target unit names, matching internal/catalog/units.go and
+// internal/setup/steps.go's naming contract.
 const (
 	execUnitName   = "valve-node-exec.service"
 	beaconUnitName = "valve-node-beacon.service"
-	execRPCAddr    = "http://127.0.0.1:8545"
-	beaconAPIAddr  = "http://127.0.0.1:5052"
 )
+
+// execRPCAddr and beaconAPIAddr resolve a poll's exec/beacon HTTP base
+// URLs from the WireConfig's port resolvers (zero value = default 8545 /
+// 5052), rather than hardcoding the defaults — a target configured with
+// custom ports must be probed on those exact ports.
+func execRPCAddr(w catalog.WireConfig) string {
+	return fmt.Sprintf("http://127.0.0.1:%d", w.ExecHTTP())
+}
+
+func beaconAPIAddr(w catalog.WireConfig) string {
+	return fmt.Sprintf("http://127.0.0.1:%d", w.BeaconHTTP())
+}
 
 // Snapshot is one point-in-time reading of a valve-node target's health.
 type Snapshot struct {
@@ -171,26 +181,29 @@ func (m *Monitor) publish(snap Snapshot) {
 func (m *Monitor) poll(ctx context.Context) Snapshot {
 	snap := Snapshot{At: time.Now()}
 
-	if res, err := m.cfg.Exec.Run(ctx, jsonRPCCmd("eth_syncing"), nil); err == nil && res.ExitCode == 0 {
+	execAddr := execRPCAddr(m.cfg.Wire)
+	beaconAddr := beaconAPIAddr(m.cfg.Wire)
+
+	if res, err := m.cfg.Exec.Run(ctx, jsonRPCCmd(execAddr, "eth_syncing"), nil); err == nil && res.ExitCode == 0 {
 		snap.ExecSyncing = parseEthSyncing(res.Stdout)
 	}
-	if res, err := m.cfg.Exec.Run(ctx, jsonRPCCmd("eth_blockNumber"), nil); err == nil && res.ExitCode == 0 {
+	if res, err := m.cfg.Exec.Run(ctx, jsonRPCCmd(execAddr, "eth_blockNumber"), nil); err == nil && res.ExitCode == 0 {
 		if head, ok := parseHexResult(res.Stdout); ok {
 			snap.ExecHead = head
 		}
 	}
-	if res, err := m.cfg.Exec.Run(ctx, jsonRPCCmd("net_peerCount"), nil); err == nil && res.ExitCode == 0 {
+	if res, err := m.cfg.Exec.Run(ctx, jsonRPCCmd(execAddr, "net_peerCount"), nil); err == nil && res.ExitCode == 0 {
 		if peers, ok := parseHexResult(res.Stdout); ok {
 			snap.ExecPeers = int(peers)
 		}
 	}
-	if res, err := m.cfg.Exec.Run(ctx, beaconSyncingCmd(), nil); err == nil && res.ExitCode == 0 {
+	if res, err := m.cfg.Exec.Run(ctx, beaconSyncingCmd(beaconAddr), nil); err == nil && res.ExitCode == 0 {
 		if slot, distance, ok := parseBeaconSyncing(res.Stdout); ok {
 			snap.BeaconSlot = slot
 			snap.BeaconDistance = distance
 		}
 	}
-	if res, err := m.cfg.Exec.Run(ctx, beaconPeerCountCmd(), nil); err == nil && res.ExitCode == 0 {
+	if res, err := m.cfg.Exec.Run(ctx, beaconPeerCountCmd(beaconAddr), nil); err == nil && res.ExitCode == 0 {
 		if peers, ok := parseBeaconPeerCount(res.Stdout); ok {
 			snap.BeaconPeers = peers
 		}
@@ -250,19 +263,19 @@ func (m *Monitor) fetchRefHead(ctx context.Context) uint64 {
 // commands
 // ---------------------------------------------------------------------
 
-func jsonRPCCmd(method string) string {
+func jsonRPCCmd(addr, method string) string {
 	return fmt.Sprintf(
 		`curl -s -m 5 -X POST -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"%s","params":[]}' %s`,
-		method, execRPCAddr,
+		method, addr,
 	)
 }
 
-func beaconSyncingCmd() string {
-	return fmt.Sprintf("curl -s -m 5 %s/eth/v1/node/syncing", beaconAPIAddr)
+func beaconSyncingCmd(addr string) string {
+	return fmt.Sprintf("curl -s -m 5 %s/eth/v1/node/syncing", addr)
 }
 
-func beaconPeerCountCmd() string {
-	return fmt.Sprintf("curl -s -m 5 %s/eth/v1/node/peer_count", beaconAPIAddr)
+func beaconPeerCountCmd(addr string) string {
+	return fmt.Sprintf("curl -s -m 5 %s/eth/v1/node/peer_count", addr)
 }
 
 func diskCmd(dir string) string {
