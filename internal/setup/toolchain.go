@@ -40,16 +40,37 @@ const rustupInstallCmd = `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup
 // catalog's rust-toolchain BuildCmds use.
 const cargoEnvPrefix = `. "$HOME/.cargo/env" 2>/dev/null || true; `
 
-// toolchainStep ensures git plus the union of build toolchains `needed`
-// requires are present on the target before install runs each client's
-// BuildCmd. It sits between preflight and install-exec in Plan().
+// needsCC reports whether any toolchain in `needed` requires a working C
+// compiler: "go" needs it for cgo (prysm-pulse's herumi-bls/blst — without
+// cc, Go silently sets CGO_ENABLED=0 and the build fails with "undefined:
+// SecretKey/Fr/G1..." deep into the build instead of a clear preflight
+// error), and "rust" needs cc as the linker driver rustc invokes.
+func needsCC(needed []string) bool {
+	for _, tc := range needed {
+		if tc == "go" || tc == "rust" {
+			return true
+		}
+	}
+	return false
+}
+
+// toolchainStep ensures git, a C compiler (when any needed toolchain
+// requires one), and the union of build toolchains `needed` requires are
+// present on the target before install runs each client's BuildCmd. It
+// sits between preflight and install-exec in Plan().
+//
+// git and cc are checked and installed independently of each other — NOT
+// bundled into a single "if git missing, apt-get git+cc" branch. On boxes
+// where git pre-exists (colima/lima images, many cloud images) but cc
+// does not, a git-gated cc install would silently skip cc, breaking any
+// cgo- or rust-toolchain build later with no clear signal at this step.
 //
 // v1 targets Debian/Ubuntu only: any package install goes through apt-get.
-// If apt-get itself is missing and something is actually missing (git or
-// go), Run fails immediately with a clear error rather than a raw shell
-// "command not found" — rust's toolchain (rustup) never needs apt, so a
-// rust-only pair works even off Debian/Ubuntu as long as git is already
-// present.
+// If apt-get itself is missing and something is actually missing (git,
+// cc, or go), Run fails immediately with a clear error rather than a raw
+// shell "command not found" — rust's toolchain (rustup) never needs apt,
+// so a rust-only pair works even off Debian/Ubuntu as long as git and cc
+// are already present.
 func toolchainStep(needed []string) Step {
 	return Step{
 		ID:    "toolchain",
@@ -65,8 +86,23 @@ func toolchainStep(needed []string) Step {
 				if err := requireAPT(ctx, e); err != nil {
 					return err
 				}
-				if err := aptInstall(ctx, e, opts, "git", "ca-certificates", "build-essential"); err != nil {
+				if err := aptInstall(ctx, e, opts, "git", "ca-certificates"); err != nil {
 					return err
+				}
+			}
+
+			if needsCC(needed) {
+				hasCC, err := commandExists(ctx, e, "cc")
+				if err != nil {
+					return fmt.Errorf("toolchain: probe cc: %w", err)
+				}
+				if !hasCC {
+					if err := requireAPT(ctx, e); err != nil {
+						return err
+					}
+					if err := aptInstall(ctx, e, opts, "build-essential"); err != nil {
+						return err
+					}
 				}
 			}
 
@@ -158,8 +194,9 @@ func aptInstall(ctx context.Context, e executor.Executor, opts *executor.RunOpts
 	return nil
 }
 
-// verifyToolchains is the toolchain step's marker probe: git plus every
-// toolchain in `needed` must actually run, not just resolve on PATH.
+// verifyToolchains is the toolchain step's marker probe: git, cc (when
+// any needed toolchain requires one), and every toolchain in `needed`
+// must actually run, not just resolve on PATH.
 func verifyToolchains(ctx context.Context, e executor.Executor, needed []string) error {
 	res, err := e.Run(ctx, "git --version", nil)
 	if err != nil {
@@ -167,6 +204,16 @@ func verifyToolchains(ctx context.Context, e executor.Executor, needed []string)
 	}
 	if res.ExitCode != 0 {
 		return fmt.Errorf("toolchain: git not available yet")
+	}
+
+	if needsCC(needed) {
+		res, err := e.Run(ctx, "cc --version", nil)
+		if err != nil {
+			return fmt.Errorf("toolchain: verify cc: %w", err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("toolchain: cc not available yet")
+		}
 	}
 
 	for _, tc := range needed {

@@ -138,6 +138,66 @@ func TestToolchain_AlreadyPresentSkipsAptEntirely(t *testing.T) {
 	}
 }
 
+// TestToolchain_CCMissingInstallsBuildEssentialEvenWhenGitPresent reproduces
+// the live E2E failure: on a box where git pre-exists (colima/lima images,
+// many cloud images) but cc does not, the old code bundled build-essential
+// into the git-missing branch only, so cc — and therefore cgo, which
+// prysm-pulse's herumi-bls/blst needs — never got installed. The cc check
+// must be independent of the git check.
+func TestToolchain_CCMissingInstallsBuildEssentialEvenWhenGitPresent(t *testing.T) {
+	needed := neededToolchains(mustClient(t, "go-pulse"), mustClient(t, "prysm-pulse"))
+	e := newFakeExecutor().
+		script("command -v git", executor.Result{ExitCode: 0}).
+		script("command -v apt-get", executor.Result{ExitCode: 0}).
+		script("command -v cc", executor.Result{ExitCode: 1}).
+		script("command -v go", executor.Result{ExitCode: 0})
+
+	step := toolchainStep(needed)
+	st := &State{Wire: testWire(), Events: make(chan Event, 100)}
+	if err := step.Run(context.Background(), e, st); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var installedBuildEssential, ranGitInstall bool
+	for _, c := range e.callLog() {
+		if strings.Contains(c, "apt-get install") && strings.Contains(c, "build-essential") {
+			installedBuildEssential = true
+		}
+		if strings.Contains(c, "apt-get install") && strings.Contains(c, " git ") {
+			ranGitInstall = true
+		}
+	}
+	if !installedBuildEssential {
+		t.Fatalf("expected build-essential apt install even though git is present; calls = %v", e.callLog())
+	}
+	if ranGitInstall {
+		t.Fatal("git was already present — apt-get install for git should not have run")
+	}
+}
+
+// TestToolchain_CCAndGitPresentSkipsAptEntirely locks in the other half of
+// the independence contract: when git, cc, and go are all already present,
+// Run must never invoke apt-get at all.
+func TestToolchain_CCAndGitPresentSkipsAptEntirely(t *testing.T) {
+	needed := neededToolchains(mustClient(t, "go-pulse"), mustClient(t, "prysm-pulse"))
+	e := newFakeExecutor().
+		script("command -v git", executor.Result{ExitCode: 0}).
+		script("command -v cc", executor.Result{ExitCode: 0}).
+		script("command -v go", executor.Result{ExitCode: 0})
+
+	step := toolchainStep(needed)
+	st := &State{Wire: testWire(), Events: make(chan Event, 100)}
+	if err := step.Run(context.Background(), e, st); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, c := range e.callLog() {
+		if strings.Contains(c, "apt-get") {
+			t.Fatalf("apt-get should never be invoked when git/cc/go are already present; calls = %v", e.callLog())
+		}
+	}
+}
+
 // TestToolchain_GitMissingInstallsViaApt locks in the always-ensure-git
 // behavior independent of any client's Toolchain.
 func TestToolchain_GitMissingInstallsViaApt(t *testing.T) {
@@ -196,6 +256,22 @@ func TestToolchain_VerifyPassesWhenGitAndGoAvailable(t *testing.T) {
 	step := toolchainStep(needed)
 	if err := step.Verify(context.Background(), e, &State{Wire: testWire()}); err != nil {
 		t.Fatalf("Verify: %v", err)
+	}
+}
+
+// TestToolchain_VerifyFailsWhenCCMissing locks in that Verify checks cc
+// independently: git and go pass, but cc --version fails (e.g. installed
+// as a broken/missing symlink) must fail Verify even though go is present.
+func TestToolchain_VerifyFailsWhenCCMissing(t *testing.T) {
+	needed := neededToolchains(mustClient(t, "go-pulse"), mustClient(t, "prysm-pulse"))
+	e := newFakeExecutor().
+		script("git --version", executor.Result{ExitCode: 0}).
+		script("go version", executor.Result{ExitCode: 0}).
+		script("cc --version", executor.Result{ExitCode: 127})
+
+	step := toolchainStep(needed)
+	if err := step.Verify(context.Background(), e, &State{Wire: testWire()}); err == nil {
+		t.Fatal("want error when cc --version fails, got nil")
 	}
 }
 
