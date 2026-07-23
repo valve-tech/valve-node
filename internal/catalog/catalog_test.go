@@ -722,3 +722,61 @@ func TestRenderUnits_PulseNetworkSelectorFlags(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderUnits_RunAsServiceUser(t *testing.T) {
+	w := WireConfig{ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse", DataDir: "/var/lib/valve-node/369"}
+	execUnit, beaconUnit, err := RenderUnits(w)
+	if err != nil {
+		t.Fatalf("RenderUnits: %v", err)
+	}
+	for _, unit := range []string{execUnit, beaconUnit} {
+		for _, want := range []string{
+			"User=" + ServiceUser,
+			"Group=" + ServiceGroup,
+			"NoNewPrivileges=true",
+			"PrivateTmp=true",
+			"PrivateDevices=true",
+			"ProtectSystem=strict",
+			"ProtectHome=true",
+			"ReadWritePaths=/var/lib/valve-node/369",
+			"ProtectKernelTunables=true",
+			"ProtectControlGroups=true",
+			"RestrictSUIDSGID=true",
+		} {
+			if !strings.Contains(unit, want) {
+				t.Errorf("unit missing %q:\n%s", want, unit)
+			}
+		}
+		if strings.Contains(unit, "AmbientCapabilities") {
+			t.Errorf("default ports must not grant AmbientCapabilities:\n%s", unit)
+		}
+	}
+}
+
+func TestRenderUnits_PrivilegedPortGrantsNetBindCap(t *testing.T) {
+	w := WireConfig{ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse",
+		DataDir: "/var/lib/valve-node/369", ExecHTTPPort: 443}
+	execUnit, beaconUnit, err := RenderUnits(w)
+	if err != nil {
+		t.Fatalf("RenderUnits: %v", err)
+	}
+	if !strings.Contains(execUnit, "AmbientCapabilities=CAP_NET_BIND_SERVICE") {
+		t.Errorf("exec unit with port 443 missing AmbientCapabilities:\n%s", execUnit)
+	}
+	if strings.Contains(beaconUnit, "AmbientCapabilities") {
+		t.Errorf("beacon unit on default ports must not gain AmbientCapabilities:\n%s", beaconUnit)
+	}
+
+	w = WireConfig{ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse",
+		DataDir: "/var/lib/valve-node/369", BeaconHTTPPort: 1023}
+	execUnit, beaconUnit, err = RenderUnits(w)
+	if err != nil {
+		t.Fatalf("RenderUnits: %v", err)
+	}
+	if strings.Contains(execUnit, "AmbientCapabilities") {
+		t.Errorf("exec unit on default ports must not gain AmbientCapabilities:\n%s", execUnit)
+	}
+	if !strings.Contains(beaconUnit, "AmbientCapabilities=CAP_NET_BIND_SERVICE") {
+		t.Errorf("beacon unit with port 1023 missing AmbientCapabilities:\n%s", beaconUnit)
+	}
+}

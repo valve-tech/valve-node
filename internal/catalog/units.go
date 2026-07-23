@@ -66,6 +66,15 @@ func (w WireConfig) ExecP2P() int {
 // the plan decision — always loopback, always 8551.
 const engineEndpoint = "http://127.0.0.1:8551"
 
+// ServiceUser/ServiceGroup are the dedicated unprivileged system account
+// the execution and beacon services run as (the User=/Group= lines in the
+// rendered units). Setup's account step creates the account; the wire step
+// chowns the data dir to it.
+const (
+	ServiceUser  = "valve-node"
+	ServiceGroup = "valve-node"
+)
+
 const unitTemplate = `[Unit]
 Description=valve-node {{.Description}}
 After=network-online.target
@@ -73,10 +82,23 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User={{.User}}
+Group={{.Group}}
 ExecStart={{.ExecStart}}
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{.DataDir}}
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+{{- if .NetBindCap}}
+AmbientCapabilities=CAP_NET_BIND_SERVICE{{end}}
 
 [Install]
 WantedBy=multi-user.target
@@ -85,6 +107,12 @@ WantedBy=multi-user.target
 type unitVars struct {
 	Description string
 	ExecStart   string
+	User, Group string
+	DataDir     string
+	// NetBindCap grants CAP_NET_BIND_SERVICE when one of this unit's
+	// configured ports is privileged (<1024) — without it the
+	// unprivileged service user cannot bind such a port.
+	NetBindCap bool
 }
 
 var unitTmpl = template.Must(template.New("unit").Parse(unitTemplate))
@@ -135,20 +163,30 @@ func RenderUnits(w WireConfig) (execUnit, beaconUnit string, err error) {
 		return "", "", err
 	}
 
-	execUnit, err = renderUnit("execution client ("+w.ExecID+")", execCmd)
+	execUnit, err = renderUnit("execution client ("+w.ExecID+")", execCmd, w,
+		w.ExecHTTP() < 1024 || w.ExecP2P() < 1024)
 	if err != nil {
 		return "", "", err
 	}
-	beaconUnit, err = renderUnit("beacon client ("+w.BeaconID+")", beaconCmd)
+	beaconUnit, err = renderUnit("beacon client ("+w.BeaconID+")", beaconCmd, w,
+		w.BeaconHTTP() < 1024)
 	if err != nil {
 		return "", "", err
 	}
 	return execUnit, beaconUnit, nil
 }
 
-func renderUnit(description, execStart string) (string, error) {
+func renderUnit(description, execStart string, w WireConfig, netBindCap bool) (string, error) {
 	var buf bytes.Buffer
-	if err := unitTmpl.Execute(&buf, unitVars{Description: description, ExecStart: execStart}); err != nil {
+	err := unitTmpl.Execute(&buf, unitVars{
+		Description: description,
+		ExecStart:   execStart,
+		User:        ServiceUser,
+		Group:       ServiceGroup,
+		DataDir:     w.DataDir,
+		NetBindCap:  netBindCap,
+	})
+	if err != nil {
 		return "", err
 	}
 	return buf.String(), nil
