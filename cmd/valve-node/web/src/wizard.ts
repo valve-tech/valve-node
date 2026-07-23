@@ -30,6 +30,13 @@ const STEP_PLAN: { id: string; title: string }[] = [
   { id: "handshake", title: "Verify execution/beacon handshake" },
 ];
 
+// Port defaults mirror internal/catalog/units.go's defaultExecHTTPPort /
+// defaultBeaconHTTPPort / defaultExecP2PPort — the wizard only sends a port
+// field to the server when it differs from its default (see startSetup).
+const DEFAULT_EXEC_HTTP_PORT = 8545;
+const DEFAULT_BEACON_HTTP_PORT = 5052;
+const DEFAULT_EXEC_P2P_PORT = 30303;
+
 const NETWORK_ORDER = [369, 943, 1];
 const NETWORK_BADGE: Record<number, string> = {
   369: "default",
@@ -47,6 +54,9 @@ interface State {
   archive: boolean;
   dataDir: string;
   jwtPath: string;
+  execHTTPPort: string;
+  beaconHTTPPort: string;
+  execP2PPort: string;
   starting: boolean;
   startError: string | null;
   events: api.SetupEvent[];
@@ -66,6 +76,9 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
     archive: false,
     dataDir: "",
     jwtPath: "",
+    execHTTPPort: "",
+    beaconHTTPPort: "",
+    execP2PPort: "",
     starting: false,
     startError: null,
     events: [],
@@ -93,6 +106,9 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
         state.execId = existing.wire.ExecID;
         state.beaconId = existing.wire.BeaconID;
         state.archive = existing.wire.Archive;
+        if (existing.wire.ExecHTTPPort) state.execHTTPPort = String(existing.wire.ExecHTTPPort);
+        if (existing.wire.BeaconHTTPPort) state.beaconHTTPPort = String(existing.wire.BeaconHTTPPort);
+        if (existing.wire.ExecP2PPort) state.execP2PPort = String(existing.wire.ExecP2PPort);
       }
       render();
     } catch (err) {
@@ -229,6 +245,22 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
             JWT secret path <span class="muted">(default: &lt;data dir&gt;/jwt.hex)</span>
             <input id="jwt-path-input" type="text" placeholder="${escapeHtml(defaultDataDir)}/jwt.hex" value="${escapeHtml(state.jwtPath)}" />
           </label>
+          <label>
+            Execution HTTP port <span class="muted">(default: ${DEFAULT_EXEC_HTTP_PORT})</span>
+            <input id="exec-http-port-input" type="text" inputmode="numeric" placeholder="${DEFAULT_EXEC_HTTP_PORT}" value="${escapeHtml(state.execHTTPPort)}" />
+          </label>
+          <label>
+            Beacon HTTP port <span class="muted">(default: ${DEFAULT_BEACON_HTTP_PORT})</span>
+            <input id="beacon-http-port-input" type="text" inputmode="numeric" placeholder="${DEFAULT_BEACON_HTTP_PORT}" value="${escapeHtml(state.beaconHTTPPort)}" />
+          </label>
+          <label>
+            Execution p2p port <span class="muted">(default: ${DEFAULT_EXEC_P2P_PORT})</span>
+            <input id="exec-p2p-port-input" type="text" inputmode="numeric" placeholder="${DEFAULT_EXEC_P2P_PORT}" value="${escapeHtml(state.execP2PPort)}" />
+          </label>
+          <p class="muted small">
+            Leave any of these blank to use the default. The engine API port (8551) is fixed and
+            loopback-only — it isn't configurable.
+          </p>
         </details>
         <div class="wizard-actions">
           <button class="btn btn-ghost" data-action="goto-clients">Back</button>
@@ -246,6 +278,21 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
 
     const stepRows = STEP_PLAN.map((s) => `<li>${escapeHtml(s.title)}</li>`).join("");
 
+    const execHTTPPort = portOverride(state.execHTTPPort, DEFAULT_EXEC_HTTP_PORT);
+    const beaconHTTPPort = portOverride(state.beaconHTTPPort, DEFAULT_BEACON_HTTP_PORT);
+    const execP2PPort = portOverride(state.execP2PPort, DEFAULT_EXEC_P2P_PORT);
+    const portsRow =
+      execHTTPPort || beaconHTTPPort || execP2PPort
+        ? `<tr><th>Non-default ports</th><td>${[
+            execHTTPPort ? `exec HTTP ${execHTTPPort}` : null,
+            beaconHTTPPort ? `beacon HTTP ${beaconHTTPPort}` : null,
+            execP2PPort ? `exec p2p ${execP2PPort}` : null,
+          ]
+            .filter((s): s is string => s !== null)
+            .map(escapeHtml)
+            .join(", ")}</td></tr>`
+        : "";
+
     return `
       <section>
         <h2>4. Review</h2>
@@ -258,6 +305,7 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
             <tr><th>Mode</th><td>${state.archive ? "Archive" : "Full"}</td></tr>
             <tr><th>Data directory</th><td><code>${escapeHtml(dataDir)}</code></td></tr>
             <tr><th>JWT secret path</th><td><code>${escapeHtml(jwtPath)}</code></td></tr>
+            ${portsRow}
           </tbody>
         </table>
         <p class="muted small">
@@ -380,6 +428,25 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
     const jwtPathInput = root.querySelector<HTMLInputElement>("#jwt-path-input");
     if (dataDirInput) state.dataDir = dataDirInput.value.trim();
     if (jwtPathInput) state.jwtPath = jwtPathInput.value.trim();
+
+    const execHTTPPortInput = root.querySelector<HTMLInputElement>("#exec-http-port-input");
+    const beaconHTTPPortInput = root.querySelector<HTMLInputElement>("#beacon-http-port-input");
+    const execP2PPortInput = root.querySelector<HTMLInputElement>("#exec-p2p-port-input");
+    if (execHTTPPortInput) state.execHTTPPort = execHTTPPortInput.value.trim();
+    if (beaconHTTPPortInput) state.beaconHTTPPort = beaconHTTPPortInput.value.trim();
+    if (execP2PPortInput) state.execP2PPort = execP2PPortInput.value.trim();
+  }
+
+  // portOverride parses a port field's raw string and returns it only if
+  // it's a valid positive integer that differs from def — the wizard never
+  // sends a port field equal to the server's own default, since "not set"
+  // and "set to default" are indistinguishable once persisted anyway (see
+  // api.ts's WireConfig comment).
+  function portOverride(raw: string, def: number): number | undefined {
+    if (!raw) return undefined;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || n <= 0 || n === def) return undefined;
+    return n;
   }
 
   async function startSetup(): Promise<void> {
@@ -396,6 +463,13 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
     };
     if (state.dataDir) wire.DataDir = state.dataDir;
     if (state.jwtPath) wire.JWTPath = state.jwtPath;
+
+    const execHTTPPort = portOverride(state.execHTTPPort, DEFAULT_EXEC_HTTP_PORT);
+    const beaconHTTPPort = portOverride(state.beaconHTTPPort, DEFAULT_BEACON_HTTP_PORT);
+    const execP2PPort = portOverride(state.execP2PPort, DEFAULT_EXEC_P2P_PORT);
+    if (execHTTPPort !== undefined) wire.ExecHTTPPort = execHTTPPort;
+    if (beaconHTTPPort !== undefined) wire.BeaconHTTPPort = beaconHTTPPort;
+    if (execP2PPort !== undefined) wire.ExecP2PPort = execP2PPort;
 
     try {
       await api.startSetup(state.targetId, wire);

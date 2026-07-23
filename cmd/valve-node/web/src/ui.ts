@@ -91,6 +91,41 @@ export function badge(text: string, kind: "ok" | "bad" | "warn" | "neutral"): st
   return `<span class="badge badge-${kind}">${escapeHtml(text)}</span>`;
 }
 
+// dot renders a small reachability indicator (green/red/gray circle) —
+// used where a full badge pill would be too heavy (e.g. next to a copyable
+// URL on the endpoints card).
+export function dot(kind: "ok" | "bad" | "neutral"): string {
+  return `<span class="dot dot-${kind}"></span>`;
+}
+
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
+
+// fmtBytes renders a byte count as a human-readable size ("3.9 TB", "512 MB").
+export function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n === 0) return "0 B";
+  let value = n;
+  let unit = 0;
+  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  const digits = value < 10 ? 2 : value < 100 ? 1 : 0;
+  return `${value.toFixed(digits)} ${BYTE_UNITS[unit]}`;
+}
+
+// copyToClipboard writes text to the clipboard, returning whether it
+// succeeded (the Clipboard API can be unavailable — insecure context, denied
+// permission — and callers should show a fallback message rather than throw).
+export async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // on wires a delegated click handler for elements matching `[data-action]`
 // inside container, calling handler(action, target) once per click.
 export function onAction(

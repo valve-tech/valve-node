@@ -61,6 +61,13 @@ export interface WireConfig {
   DataDir: string;
   JWTPath: string;
   Archive: boolean;
+  // ExecHTTPPort/BeaconHTTPPort/ExecP2PPort are omitted (undefined) when a
+  // target used the server's defaults (8545/5052/30303) — the server
+  // zero-values these to the same defaults, so there's no wire distinction
+  // between "not set" and "set to default" once persisted.
+  ExecHTTPPort?: number;
+  BeaconHTTPPort?: number;
+  ExecP2PPort?: number;
 }
 
 export type TargetMode = "local" | "ssh";
@@ -108,6 +115,11 @@ export interface StartSetupRequest {
   DataDir?: string;
   JWTPath?: string;
   Archive: boolean;
+  // Only send these when the operator changed a port from its default in
+  // the wizard's Advanced section — see WireConfig's comment above.
+  ExecHTTPPort?: number;
+  BeaconHTTPPort?: number;
+  ExecP2PPort?: number;
 }
 
 export function startSetup(id: string, wire: StartSetupRequest): Promise<{ status: string }> {
@@ -217,6 +229,86 @@ export function explain(id: string, lines?: string[]): Promise<ExplainResponse> 
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
   });
+}
+
+// ---------------------------------------------------------------------
+// service control / clear / disk usage / endpoints / firewall
+// (internal/ops — day-2 operator actions on a wired target)
+// ---------------------------------------------------------------------
+
+export type ServiceID = "exec" | "beacon";
+export type ServiceActionKind = "start" | "stop" | "restart";
+
+// serviceAction's response mirrors serviceActionResponse in api.go, which
+// deliberately carries no json tag and so encodes as PascalCase {"Active":...}.
+export interface ServiceActionResult {
+  Active: boolean;
+}
+
+export function serviceAction(
+  id: string,
+  svc: ServiceID,
+  action: ServiceActionKind,
+): Promise<ServiceActionResult> {
+  return request<ServiceActionResult>(
+    `/api/targets/${encodeURIComponent(id)}/services/${svc}/${action}`,
+    { method: "POST" },
+  );
+}
+
+// clearService always confirms with the service id itself — the UI's own
+// modal is the "type the service name" confirmation gate; this call is only
+// reachable after that gate has passed.
+export function clearService(id: string, svc: ServiceID): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/targets/${encodeURIComponent(id)}/services/${svc}/clear`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ Confirm: svc }),
+  });
+}
+
+// DiskUsage mirrors ops.DU, another untagged struct — PascalCase fields.
+export interface DiskUsage {
+  ExecBytes: number;
+  BeaconBytes: number;
+  DiskFreeBytes: number;
+  ExpectedExecBytes: number;
+  ExpectedBeaconBytes: number;
+  SyncLabel: string;
+  GenesisSyncLabel: string;
+}
+
+export function getDiskUsage(id: string): Promise<DiskUsage> {
+  return request<DiskUsage>(`/api/targets/${encodeURIComponent(id)}/du`);
+}
+
+// EndpointInfo mirrors ops.EndpointInfo.
+export interface EndpointInfo {
+  ExecHTTP: string;
+  BeaconHTTP: string;
+  ExecReachable: boolean;
+  BeaconReachable: boolean;
+  ChainIDMatches: boolean;
+  Access: "local" | "ssh";
+  TunnelHint: string;
+}
+
+export function getEndpoints(id: string): Promise<EndpointInfo> {
+  return request<EndpointInfo>(`/api/targets/${encodeURIComponent(id)}/endpoints`);
+}
+
+// CheckItem mirrors ops.CheckItem.
+export interface CheckItem {
+  ID: string;
+  Title: string;
+  Why: string;
+  Status: "pass" | "fail" | "warn" | "unknown";
+  Detail: string;
+  Fix: string;
+}
+
+export function getFirewallChecklist(id: string): Promise<CheckItem[]> {
+  return request<CheckItem[]>(`/api/targets/${encodeURIComponent(id)}/firewall`);
 }
 
 // ---------------------------------------------------------------------
