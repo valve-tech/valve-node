@@ -193,6 +193,13 @@ func TestClients_ResolveAndHaveLearnURLs(t *testing.T) {
 		if c.BuildCmd == "" {
 			t.Errorf("client %q has empty BuildCmd", id)
 		}
+		wantInstallPath := "/usr/local/bin/" + id
+		if !strings.Contains(c.BuildCmd, wantInstallPath) {
+			t.Errorf("client %q BuildCmd does not install to %q:\n%s", id, wantInstallPath, c.BuildCmd)
+		}
+		if c.Toolchain != "go" && c.Toolchain != "rust" {
+			t.Errorf("client %q has invalid Toolchain %q, want \"go\" or \"rust\"", id, c.Toolchain)
+		}
 		if c.PinVersion == "" {
 			t.Errorf("client %q has empty PinVersion", id)
 		}

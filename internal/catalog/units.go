@@ -150,9 +150,11 @@ func execCommand(w WireConfig) (string, error) {
 
 	case "go-pulse":
 		// go-pulse is the Geth-derived PulseChain execution client
-		// (clients.ts), so it retains geth's binary name and flag surface.
+		// (clients.ts): geth's flag surface, but installed at
+		// /usr/local/bin/go-pulse (task-4b BuildCmd), so it's invoked by
+		// that name, not geth's.
 		cmd := fmt.Sprintf(
-			"geth --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %s",
+			"go-pulse --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %s",
 			w.DataDir, w.JWTPath, execHTTPPort,
 		)
 		switch w.ChainID {
@@ -174,7 +176,7 @@ func execCommand(w WireConfig) (string, error) {
 			return "", fmt.Errorf("catalog: no erigon-pulse --chain mapping for chain id %d", w.ChainID)
 		}
 		cmd := fmt.Sprintf(
-			"erigon --chain %s --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %s",
+			"erigon-pulse --chain %s --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %s",
 			chain, w.DataDir, w.JWTPath, execHTTPPort,
 		)
 		// erigon defaults to archive mode; pruning is opt-in via --prune flags.
@@ -196,19 +198,25 @@ func execCommand(w WireConfig) (string, error) {
 func beaconCommand(w WireConfig, net Network) (string, error) {
 	switch w.BeaconID {
 	case "lighthouse-pulse", "lighthouse":
+		// Both lighthouse-family clients share their flag surface, but
+		// lighthouse-pulse installs to /usr/local/bin/lighthouse-pulse
+		// (task-4b BuildCmd) while upstream sigp lighthouse installs to
+		// /usr/local/bin/lighthouse — invoke each by its own binary name.
 		network, ok := lighthouseNetworkName[w.ChainID]
 		if !ok {
 			return "", fmt.Errorf("catalog: no lighthouse --network mapping for chain id %d", w.ChainID)
 		}
 		cmd := fmt.Sprintf(
-			"lighthouse bn --network %s --datadir %s --execution-endpoint %s --execution-jwt %s --checkpoint-sync-url %s --genesis-beacon-api-url %s --http --http-address 127.0.0.1 --http-port %s",
-			network, w.DataDir, engineEndpoint, w.JWTPath, net.CheckpointURL, net.CheckpointURL, beaconHTTPPort,
+			"%s bn --network %s --datadir %s --execution-endpoint %s --execution-jwt %s --checkpoint-sync-url %s --genesis-beacon-api-url %s --http --http-address 127.0.0.1 --http-port %s",
+			w.BeaconID, network, w.DataDir, engineEndpoint, w.JWTPath, net.CheckpointURL, net.CheckpointURL, beaconHTTPPort,
 		)
 		return cmd, nil
 
 	case "prysm-pulse":
+		// prysm-pulse installs to /usr/local/bin/prysm-pulse (task-4b
+		// BuildCmd), not the upstream beacon-chain binary name.
 		cmd := fmt.Sprintf(
-			"beacon-chain --datadir=%s --execution-endpoint=%s --jwt-secret=%s --checkpoint-sync-url=%s --genesis-beacon-api-url=%s --rpc-host=127.0.0.1 --grpc-gateway-host=127.0.0.1 --grpc-gateway-port=%s",
+			"prysm-pulse --datadir=%s --execution-endpoint=%s --jwt-secret=%s --checkpoint-sync-url=%s --genesis-beacon-api-url=%s --rpc-host=127.0.0.1 --grpc-gateway-host=127.0.0.1 --grpc-gateway-port=%s",
 			w.DataDir, engineEndpoint, w.JWTPath, net.CheckpointURL, net.CheckpointURL, beaconHTTPPort,
 		)
 		switch w.ChainID {

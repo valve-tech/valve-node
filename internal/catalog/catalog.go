@@ -34,8 +34,11 @@ type Client struct {
 	ReleaseURL func(goos, goarch, version string) string
 
 	PinVersion string // known-good default version tag
-	BuildCmd   string // source-build fallback, run in a clone dir
-	LearnURL   string
+	BuildCmd   string // source-build recipe: a full sh script, run in a fresh
+	// working dir, that ends with the binary installed executable at
+	// /usr/local/bin/<ID> (matching what setup's install-step Verify checks).
+	Toolchain string // "go" | "rust" — the build toolchain BuildCmd needs
+	LearnURL  string
 }
 
 // Networks returns the full catalog of supported chains.
