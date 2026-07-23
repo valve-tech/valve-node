@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"io"
@@ -9,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
+	"time"
 )
 
 // local runs commands and touches files on the machine it executes on.
@@ -22,6 +23,25 @@ func NewLocal() Executor {
 func (l *local) Run(ctx context.Context, cmd string, opts *RunOpts) (Result, error) {
 	c := exec.CommandContext(ctx, "sh", "-c", cmd)
 
+	// Run cmd in its own process group so that ctx cancellation can kill not
+	// just the direct `sh` PID but every descendant it spawned (including
+	// anything it backgrounded and detached from, e.g. `foo &`), by signaling
+	// the whole group. Without this, an orphaned child that inherited the
+	// stdout pipe's write end keeps that pipe open, and Run would otherwise
+	// hang reading it until the orphan exits on its own.
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.Cancel = func() error {
+		if c.Process == nil {
+			return os.ErrProcessDone
+		}
+		return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+	}
+	// Backstop: if killing the process group somehow doesn't unblock our
+	// stdout read within this window (e.g. a doubly-detached daemon in a
+	// different process group), exec forcibly closes the stdout pipe so Run
+	// can still return instead of hanging forever.
+	c.WaitDelay = 2 * time.Second
+
 	var stdoutBuf, stderrBuf bytes.Buffer
 	c.Stderr = &stderrBuf
 
@@ -34,29 +54,29 @@ func (l *local) Run(ctx context.Context, cmd string, opts *RunOpts) (Result, err
 		return Result{}, err
 	}
 
-	scanErrCh := make(chan error, 1)
+	var streamFn StreamFunc
+	if opts != nil {
+		streamFn = opts.Stream
+	}
+	w := &lineStreamer{buf: &stdoutBuf, fn: streamFn}
+
+	copyErrCh := make(chan error, 1)
 	go func() {
-		scanner := bufio.NewScanner(stdoutPipe)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
-			stdoutBuf.WriteString(line)
-			stdoutBuf.WriteByte('\n')
-			if opts != nil && opts.Stream != nil {
-				opts.Stream(line)
-			}
-		}
-		scanErrCh <- scanner.Err()
+		_, err := io.Copy(w, stdoutPipe)
+		copyErrCh <- err
 	}()
 
-	scanErr := <-scanErrCh
+	// It is incorrect to call Wait before all reads from the StdoutPipe have
+	// completed, so wait for the copy goroutine first.
+	copyErr := <-copyErrCh
+	w.Flush()
 	waitErr := c.Wait()
 
 	if ctx.Err() != nil {
 		return Result{}, ctx.Err()
 	}
-	if scanErr != nil && scanErr != io.EOF {
-		return Result{}, scanErr
+	if copyErr != nil {
+		return Result{}, copyErr
 	}
 
 	result := Result{
@@ -82,7 +102,13 @@ func (l *local) WriteFile(_ context.Context, path string, content []byte, mode f
 			return err
 		}
 	}
-	return os.WriteFile(path, content, mode)
+	if err := os.WriteFile(path, content, mode); err != nil {
+		return err
+	}
+	// os.WriteFile only applies mode on create; an existing file keeps its
+	// old permissions, and umask can still narrow them even then. Chmod
+	// unconditionally so mode is authoritative in both cases.
+	return os.Chmod(path, mode)
 }
 
 func (l *local) ReadFile(_ context.Context, path string) ([]byte, error) {

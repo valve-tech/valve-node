@@ -229,6 +229,59 @@ func TestSSH_WriteFile_ReadFile_RoundTrips(t *testing.T) {
 	}
 }
 
+// sshLargeLineCmd is a portable (no coreutils/GNU-isms) shell pipeline that
+// prints exactly 2MB of 'x' characters with no trailing newline, as a
+// single unbroken line — well past the historical 1MB scanner buffer cap.
+const sshLargeLineCmd = "head -c 2097152 /dev/zero | tr '\\0' 'x'"
+
+func TestSSH_Run_LargeSingleLineStdout_NoStream(t *testing.T) {
+	d, keyPath := startTestSSHD(t)
+	e, err := NewSSH(newSSHConfig(t, d, keyPath))
+	if err != nil {
+		t.Fatalf("NewSSH: %v", err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+
+	const size = 2 * 1024 * 1024
+
+	res, err := e.Run(context.Background(), sshLargeLineCmd, nil)
+	if err != nil {
+		t.Fatalf("Run returned error for a 2MB single line: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", res.ExitCode)
+	}
+	if len(res.Stdout) != size {
+		t.Errorf("len(Stdout) = %d, want %d", len(res.Stdout), size)
+	}
+	if strings.Count(res.Stdout, "x") != size {
+		t.Errorf("Stdout content is not all 'x'")
+	}
+}
+
+func TestSSH_Run_LargeSingleLineStdout_WithStream(t *testing.T) {
+	d, keyPath := startTestSSHD(t)
+	e, err := NewSSH(newSSHConfig(t, d, keyPath))
+	if err != nil {
+		t.Fatalf("NewSSH: %v", err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+
+	const size = 2 * 1024 * 1024
+	opts := &RunOpts{Stream: func(line string) {}}
+
+	res, err := e.Run(context.Background(), sshLargeLineCmd, opts)
+	if err != nil {
+		t.Fatalf("Run returned error for a 2MB single line with Stream set: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", res.ExitCode)
+	}
+	if len(res.Stdout) != size {
+		t.Errorf("len(Stdout) = %d, want %d", len(res.Stdout), size)
+	}
+}
+
 func TestSSH_TOFU_UnknownHostAppendsKey(t *testing.T) {
 	d, keyPath := startTestSSHD(t)
 	cfg := newSSHConfig(t, d, keyPath)

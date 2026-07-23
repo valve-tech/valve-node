@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -140,6 +139,12 @@ func (s *sshExecutor) Run(ctx context.Context, cmd string, opts *RunOpts) (Resul
 	}
 	defer session.Close()
 
+	// SSH sessions have no WaitDelay equivalent: unlike os/exec, there's no
+	// stdlib backstop that forcibly unblocks a stuck read after ctx is
+	// canceled. That guarantee instead comes from this goroutine: closing
+	// the session on ctx.Done() tears down its underlying channel, which
+	// unblocks the io.Copy below (it returns an error reading the now-closed
+	// stdoutPipe) so Run cannot hang forever past ctx cancellation.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -162,29 +167,27 @@ func (s *sshExecutor) Run(ctx context.Context, cmd string, opts *RunOpts) (Resul
 		return Result{}, fmt.Errorf("start ssh command: %w", err)
 	}
 
-	scanErrCh := make(chan error, 1)
+	var streamFn StreamFunc
+	if opts != nil {
+		streamFn = opts.Stream
+	}
+	w := &lineStreamer{buf: &stdoutBuf, fn: streamFn}
+
+	copyErrCh := make(chan error, 1)
 	go func() {
-		scanner := bufio.NewScanner(stdoutPipe)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
-			stdoutBuf.WriteString(line)
-			stdoutBuf.WriteByte('\n')
-			if opts != nil && opts.Stream != nil {
-				opts.Stream(line)
-			}
-		}
-		scanErrCh <- scanner.Err()
+		_, err := io.Copy(w, stdoutPipe)
+		copyErrCh <- err
 	}()
 
-	scanErr := <-scanErrCh
+	copyErr := <-copyErrCh
+	w.Flush()
 	waitErr := session.Wait()
 
 	if ctx.Err() != nil {
 		return Result{}, ctx.Err()
 	}
-	if scanErr != nil && scanErr != io.EOF {
-		return Result{}, scanErr
+	if copyErr != nil {
+		return Result{}, copyErr
 	}
 
 	result := Result{
