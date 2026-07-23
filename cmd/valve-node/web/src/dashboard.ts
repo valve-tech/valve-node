@@ -345,6 +345,7 @@ export function renderDashboard(root: HTMLElement, targetId: string): () => void
         <p class="card-links">
           <a href="#/logs/${encodeURIComponent(targetId)}">View logs →</a>
           <a href="#/security/${encodeURIComponent(targetId)}">Security →</a>
+          <a href="#/diag/${encodeURIComponent(targetId)}">Diagnostics →</a>
         </p>
       </div>
     `;

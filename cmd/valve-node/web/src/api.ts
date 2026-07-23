@@ -311,6 +311,10 @@ export function getFirewallChecklist(id: string): Promise<CheckItem[]> {
   return request<CheckItem[]>(`/api/targets/${encodeURIComponent(id)}/firewall`);
 }
 
+export function getNetworkDiagnostics(id: string): Promise<CheckItem[]> {
+  return request<CheckItem[]>(`/api/targets/${encodeURIComponent(id)}/diagnostics`);
+}
+
 // ---------------------------------------------------------------------
 // settings
 // ---------------------------------------------------------------------

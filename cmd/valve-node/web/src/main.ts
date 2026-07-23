@@ -5,6 +5,7 @@
 import "./style.css";
 import { renderDashboard } from "./dashboard";
 import { renderLogs } from "./logs";
+import { renderDiagnostics } from "./diag";
 import { renderSecurity } from "./security";
 import { renderSettings } from "./settings";
 import { renderShell } from "./ui";
@@ -28,7 +29,7 @@ function parseHash(): Route {
   const parts = hash.split("/").filter(Boolean);
   if (parts.length === 0) return { screen: "targets" };
   const [screen, rawId] = parts;
-  if (screen === "setup" || screen === "dash" || screen === "logs" || screen === "security") {
+  if (screen === "setup" || screen === "dash" || screen === "logs" || screen === "security" || screen === "diag") {
     return { screen, id: rawId ? decodeURIComponent(rawId) : undefined };
   }
   return { screen: screen ?? "targets" };
@@ -87,6 +88,13 @@ function route(): void {
         return;
       }
       currentCleanup = mount((root) => renderSecurity(root, id));
+      break;
+    case "diag":
+      if (!id) {
+        location.hash = "#/targets";
+        return;
+      }
+      currentCleanup = mount((root) => renderDiagnostics(root, id));
       break;
     case "settings":
       currentCleanup = mount((root) => renderSettings(root));
