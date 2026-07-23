@@ -364,6 +364,24 @@ func wireStep() Step {
 				}
 			}
 
+			// Re-own the whole data tree to the service user on every run.
+			// This covers three cases with one command: the JWT just
+			// written above as root, a fresh DataDir, and — the migration
+			// path — a pre-de-root install whose entire tree is still
+			// root-owned. It must happen before the units below are
+			// (re)written and restarted, so the services never come up
+			// unable to write their own data.
+			chownCmd := fmt.Sprintf("mkdir -p %s && chown -R %s:%s %s %s",
+				shQuote(w.DataDir), catalog.ServiceUser, catalog.ServiceGroup,
+				shQuote(w.DataDir), shQuote(jwtPath))
+			res, err := e.Run(ctx, chownCmd, opts)
+			if err != nil {
+				return fmt.Errorf("wire: chown data dir: %w", err)
+			}
+			if res.ExitCode != 0 {
+				return fmt.Errorf("wire: chown data dir failed (exit %d): %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+			}
+
 			execUnit, beaconUnit, err := catalog.RenderUnits(w)
 			if err != nil {
 				return fmt.Errorf("wire: render units: %w", err)
@@ -394,7 +412,7 @@ func wireStep() Step {
 				"systemctl daemon-reload && systemctl enable --now %s && systemctl enable --now %s",
 				execUnitName, beaconUnitName,
 			)
-			res, err := e.Run(ctx, cmd, opts)
+			res, err = e.Run(ctx, cmd, opts)
 			if err != nil {
 				return fmt.Errorf("wire: systemctl: %w", err)
 			}
@@ -430,6 +448,16 @@ func wireStep() Step {
 			}
 			if res.ExitCode != 0 {
 				return fmt.Errorf("wire: jwt/unit files not all present yet")
+			}
+
+			// Ownership is part of "wired": a root-owned data dir means a
+			// pre-de-root install that Run must migrate (chown -R).
+			res, err = e.Run(ctx, fmt.Sprintf("stat -c %%U %s", shQuote(w.DataDir)), nil)
+			if err != nil {
+				return fmt.Errorf("wire: verify owner: %w", err)
+			}
+			if owner := strings.TrimSpace(res.Stdout); owner != catalog.ServiceUser {
+				return fmt.Errorf("wire: %s is owned by %q, not the service user %q yet", w.DataDir, owner, catalog.ServiceUser)
 			}
 
 			res, err = e.Run(ctx, fmt.Sprintf("systemctl is-enabled %s %s", execUnitName, beaconUnitName), nil)

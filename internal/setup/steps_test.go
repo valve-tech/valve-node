@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -548,6 +549,7 @@ func TestWire_VerifyFailsOnContentMismatchAndRunRewritesAndRestarts(t *testing.T
 
 	e := newFakeExecutor().
 		script("test -f", executor.Result{ExitCode: 0}). // jwt + both unit files present
+		script("stat -c %U", executor.Result{Stdout: catalog.ServiceUser + "\n", ExitCode: 0}).
 		script("systemctl is-enabled", executor.Result{Stdout: "enabled\nenabled\n", ExitCode: 0}).
 		script("systemctl daemon-reload", executor.Result{ExitCode: 0}).
 		script("systemctl restart", executor.Result{ExitCode: 0})
@@ -602,6 +604,7 @@ func TestWire_VerifyPassesWhenContentMatchesDesiredRender(t *testing.T) {
 
 	e := newFakeExecutor().
 		script("test -f", executor.Result{ExitCode: 0}).
+		script("stat -c %U", executor.Result{Stdout: catalog.ServiceUser + "\n", ExitCode: 0}).
 		script("systemctl is-enabled", executor.Result{Stdout: "enabled\nenabled\n", ExitCode: 0})
 	e.files[execUnitPath] = []byte(wantExec)
 	e.files[beaconUnitPath] = []byte(wantBeacon)
@@ -874,5 +877,71 @@ func TestAccount_VerifyChecksUserExists(t *testing.T) {
 		script("id -u "+catalog.ServiceUser, executor.Result{Stdout: "998\n", ExitCode: 0})
 	if err := step.Verify(context.Background(), e, &State{Wire: testWire()}); err != nil {
 		t.Fatalf("want Verify to pass when the user exists, got %v", err)
+	}
+}
+
+func TestWire_RunChownsDataDirToServiceUser(t *testing.T) {
+	e := newFakeExecutor()
+	step := wireStep()
+	if err := step.Run(context.Background(), e, &State{Wire: testWire()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	wantChown := fmt.Sprintf("mkdir -p '/mnt/reth' && chown -R %s:%s '/mnt/reth' '/mnt/reth/jwt.hex'",
+		catalog.ServiceUser, catalog.ServiceGroup)
+	var found bool
+	var chownIdx, writeIdx int
+	for i, c := range e.callLog() {
+		if c == wantChown {
+			found, chownIdx = true, i
+		}
+		if strings.HasPrefix(c, "WriteFile /etc/systemd/system/valve-node-exec.service") {
+			writeIdx = i
+		}
+	}
+	if !found {
+		t.Fatalf("no chown command %q in calls: %v", wantChown, e.callLog())
+	}
+	if chownIdx > writeIdx {
+		t.Fatalf("chown (call %d) must run before the units are written (call %d)", chownIdx, writeIdx)
+	}
+}
+
+func TestWire_RunFailsWhenChownFails(t *testing.T) {
+	e := newFakeExecutor().
+		script("chown -R", executor.Result{ExitCode: 1, Stderr: "chown: changing ownership: read-only file system"})
+	step := wireStep()
+	err := step.Run(context.Background(), e, &State{Wire: testWire()})
+	if err == nil {
+		t.Fatal("want error when chown fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "read-only file system") {
+		t.Fatalf("error %q does not surface chown stderr", err)
+	}
+}
+
+func TestWire_VerifyFailsWhenDataDirNotOwnedByServiceUser(t *testing.T) {
+	w := testWire()
+	execUnit, beaconUnit, err := catalog.RenderUnits(w)
+	if err != nil {
+		t.Fatalf("RenderUnits: %v", err)
+	}
+	e := newFakeExecutor().
+		script("test -f", executor.Result{ExitCode: 0}).
+		script("systemctl is-enabled", executor.Result{Stdout: "enabled\nenabled\n", ExitCode: 0}).
+		script("stat -c %U", executor.Result{Stdout: "root\n", ExitCode: 0})
+	e.files["/etc/systemd/system/valve-node-exec.service"] = []byte(execUnit)
+	e.files["/etc/systemd/system/valve-node-beacon.service"] = []byte(beaconUnit)
+	step := wireStep()
+	err = step.Verify(context.Background(), e, &State{Wire: w})
+	if err == nil {
+		t.Fatal("want Verify error while the data dir is still root-owned, got nil")
+	}
+	if !strings.Contains(err.Error(), "root") || !strings.Contains(err.Error(), catalog.ServiceUser) {
+		t.Fatalf("error %q should name both the current owner and the wanted user", err)
+	}
+
+	e.scripts["stat -c %U"] = executor.Result{Stdout: catalog.ServiceUser + "\n", ExitCode: 0}
+	if err := step.Verify(context.Background(), e, &State{Wire: w}); err != nil {
+		t.Fatalf("want Verify to pass once the data dir is owned by %s, got %v", catalog.ServiceUser, err)
 	}
 }
