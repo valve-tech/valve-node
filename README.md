@@ -42,13 +42,17 @@ directory to the service account. Existing installs migrate automatically:
 re-run setup against the target and the units are rewritten, the data
 directory re-owned, and the services restarted.
 
-v0.3 also adds **network diagnostics**: a one-click, read-only
-troubleshooting ladder (services → local RPC/API → p2p listeners →
-inbound/outbound reachability → peers → sync → known journal error
-signatures) that pinpoints why a node has low peers or stuck sync, with a
-copy-paste fix suggested for each failing check. In SSH mode it also dials
-the target's public p2p ports from your own machine, catching hosting-
-provider firewalls an on-box check can't see.
+v0.3 also adds **network diagnostics**: a read-only troubleshooting ladder
+(services → local RPC/API → p2p listeners → inbound/outbound reachability →
+peers → sync → known journal error signatures) that runs check-by-check and
+**stops at the first failure** — the last item in the report is where your
+node's network stack breaks, with a copy-paste fix. Diagnostics run
+**automatically** when an error signature appears in the journal or a
+connection fails (service inactive, zero peers), rate-limited to one run
+per 10 minutes, and on demand from the Diagnostics screen, which always
+shows the latest report and what triggered it. In SSH mode the ladder also
+dials the target's public p2p ports from your own machine, catching
+hosting-provider firewalls an on-box check can't see.
 
 ## Requirements
 

@@ -85,6 +85,15 @@ Commit: `feat(ui): network diagnostics screen`.
 
 Add v0.3 bullet describing network diagnostics. Commit: `docs: network diagnostics in v0.3 overview`.
 
+## Addendum (user feedback, same day)
+
+Implemented after the initial five tasks, per the user's direction that diagnostics "should happen when a log triggers it or when a connection fails" and read as "check check check, failed here":
+
+- **Ladder semantics** — `NetworkDiagnostics` stops at the first `fail`; the returned slice ends at the failing rung. Warns don't stop it. The dead "service inactive → unknown" branches in later probes were removed (unreachable once a services failure stops the run).
+- **Auto-trigger** (`internal/server/diag.go`) — per-target goroutines subscribe to the existing logwatch and monitor streams (started when those are first created): error/critical journal hits and failed-connection snapshots (service inactive, zero peers) start a background run, gated by a 10-minute cooldown + singleflight. Results stored as the target's latest `DiagReport {at, trigger, items, failedId}`.
+- **API** — `GET /diagnostics` (manual; stores + returns a `DiagReport`, 409 while a run is in flight) and `GET /diagnostics/latest` (stored report or JSON null).
+- **UI** — the diag screen shows the latest report (auto or manual) with the trigger and timestamp, the failing rung badged "failed here" with its fix expanded, and a note that later checks were skipped.
+
 ## Self-Review
 
 Coverage: services/RPC/listeners/inbound/outbound/peers/sync/journal — the full "what's wrong + how to solve" ladder; UI + API + docs tasked. Types consistent: `CheckItem` reused everywhere; `DiagnoseOpts.Dial` injected for tests; `logwatch.Classify` exported in Task 1 and consumed in Task 2. Judgment calls: same IDs reused for the two shared p2p probes; thresholds (5 exec / 10 beacon peers) are deliberately loose to avoid noise; beacon P2P port knowledge stays in ops (`beaconP2PPorts`), the catalog gap noted but not addressed here.
