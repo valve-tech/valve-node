@@ -92,9 +92,19 @@ func preflightCheck(ctx context.Context, e executor.Executor, w catalog.WireConf
 	if err != nil {
 		return err
 	}
-	res, err = e.Run(ctx, fmt.Sprintf("df -B1 --output=avail %s", shQuote(w.DataDir)), nil)
+	// DataDir does not exist yet on a fresh box — it's created later by
+	// wire's mkdir — so `df` must be run against the nearest existing
+	// ancestor directory on DataDir's path, not DataDir itself.
+	dfCmd := fmt.Sprintf(
+		`d=%s; while [ ! -d "$d" ]; do d=$(dirname "$d"); done; df -B1 --output=avail "$d" | tail -1`,
+		shQuote(w.DataDir),
+	)
+	res, err = e.Run(ctx, dfCmd, nil)
 	if err != nil {
 		return fmt.Errorf("preflight: df: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("preflight: df failed probing an ancestor of %s (exit %d): %s", w.DataDir, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	avail, perr := parseDFAvail(res.Stdout)
 	if perr != nil {
@@ -217,7 +227,7 @@ func installStep(stepID, title string, client catalog.Client) Step {
 		ID:    stepID,
 		Title: title,
 		Run: func(ctx context.Context, e executor.Executor, st *State) error {
-			opts := streamOpts(st, stepID)
+			opts := streamOpts(ctx, st, stepID)
 
 			if url := client.ReleaseURL(runtime.GOOS, runtime.GOARCH, client.PinVersion); url != "" {
 				downloadPath := "/tmp/" + binaryNameFor(client.ID) + ".download"
@@ -273,7 +283,7 @@ func wireStep() Step {
 		Run: func(ctx context.Context, e executor.Executor, st *State) error {
 			w := st.Wire
 			jwtPath := jwtPathFor(w)
-			opts := streamOpts(st, "wire")
+			opts := streamOpts(ctx, st, "wire")
 
 			probe, err := e.Run(ctx, fmt.Sprintf("test -f %s", shQuote(jwtPath)), nil)
 			if err != nil {
@@ -281,7 +291,7 @@ func wireStep() Step {
 			}
 			if probe.ExitCode != 0 {
 				cmd := fmt.Sprintf(
-					"mkdir -p %s && openssl rand -hex 32 > %s && chmod 0600 %s",
+					"umask 077 && mkdir -p %s && openssl rand -hex 32 > %s && chmod 0600 %s",
 					shQuote(path.Dir(jwtPath)), shQuote(jwtPath), shQuote(jwtPath),
 				)
 				res, err := e.Run(ctx, cmd, opts)
@@ -364,7 +374,7 @@ func startStep() Step {
 		Title: "Start execution and beacon services",
 		Run: func(ctx context.Context, e executor.Executor, st *State) error {
 			cmd := fmt.Sprintf("systemctl start %s %s", execUnitName, beaconUnitName)
-			res, err := e.Run(ctx, cmd, streamOpts(st, "start"))
+			res, err := e.Run(ctx, cmd, streamOpts(ctx, st, "start"))
 			if err != nil {
 				return fmt.Errorf("start: %w", err)
 			}
@@ -407,7 +417,7 @@ func handshakeStep() Step {
 		ID:    "handshake",
 		Title: "Verify execution/beacon handshake",
 		Run: func(ctx context.Context, e executor.Executor, st *State) error {
-			opts := streamOpts(st, "handshake")
+			opts := streamOpts(ctx, st, "handshake")
 			deadline := time.Now().Add(handshakeTimeout)
 			var lastErr error
 			for {
@@ -440,6 +450,9 @@ func handshakeCheck(ctx context.Context, e executor.Executor, w catalog.WireConf
 	if err != nil {
 		return fmt.Errorf("handshake: beacon syncing probe: %w", err)
 	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("handshake: beacon /eth/v1/node/syncing curl failed (exit %d): %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
 	if code := strings.TrimSpace(res.Stdout); code != "200" {
 		return fmt.Errorf("handshake: beacon /eth/v1/node/syncing returned http %q", code)
 	}
@@ -451,6 +464,9 @@ func handshakeCheck(ctx context.Context, e executor.Executor, w catalog.WireConf
 	if err != nil {
 		return fmt.Errorf("handshake: exec eth_syncing probe: %w", err)
 	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("handshake: exec eth_syncing curl failed (exit %d): %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
 	if !strings.Contains(res.Stdout, `"jsonrpc"`) {
 		return fmt.Errorf("handshake: exec eth_syncing did not answer: %s", res.Stdout)
 	}
@@ -459,6 +475,11 @@ func handshakeCheck(ctx context.Context, e executor.Executor, w catalog.WireConf
 	if err != nil {
 		return fmt.Errorf("handshake: journalctl: %w", err)
 	}
+	// journalctl's ExitCode is deliberately not checked: it can exit
+	// non-zero for reasons that don't mean "handshake failed" (e.g. a
+	// grep-filtered pipeline finding zero matching lines exits 1) — that
+	// reads as "no lines", which authErrorLines already treats as "no
+	// auth errors found" below.
 	if bad := authErrorLines(res.Stdout); len(bad) > 0 {
 		return fmt.Errorf("handshake: beacon journal shows auth errors in the last 2m:\n%s", strings.Join(bad, "\n"))
 	}
@@ -485,11 +506,13 @@ func authErrorLines(journal string) []string {
 // ---------------------------------------------------------------------
 
 // streamOpts forwards a command's live stdout lines onto st.Events as
-// progress events for the given step id.
-func streamOpts(st *State, stepID string) *executor.RunOpts {
+// progress events for the given step id. The emit is ctx-aware; if ctx is
+// canceled while a line send is stalled on a non-draining consumer, the
+// line is dropped rather than blocking the command's execution forever.
+func streamOpts(ctx context.Context, st *State, stepID string) *executor.RunOpts {
 	return &executor.RunOpts{
 		Stream: func(line string) {
-			emit(st, Event{StepID: stepID, Line: line})
+			_ = emit(ctx, st, Event{StepID: stepID, Line: line})
 		},
 	}
 }

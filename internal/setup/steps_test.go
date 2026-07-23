@@ -65,6 +65,48 @@ func TestPreflight_FailsOnBusyPort(t *testing.T) {
 	}
 }
 
+// TestPreflight_ProbesNearestExistingAncestorOnFreshDataDir locks in finding
+// 1: DataDir does not exist yet on a fresh box (it's created later by wire's
+// mkdir), so the disk probe must walk up to the nearest existing ancestor
+// rather than running `df` directly against DataDir. We script the OLD
+// plain-df form to FAIL and the NEW ancestor-walk form to succeed; preflight
+// must pass, proving the new command shape (not the old one) is what ran.
+func TestPreflight_ProbesNearestExistingAncestorOnFreshDataDir(t *testing.T) {
+	w := testWire()
+	w.DataDir = "/var/lib/valve-node/369"
+	e := newFakeExecutor().
+		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
+		// The OLD code's exact command shape — must NOT be what's called.
+		script("df -B1 --output=avail '/var/lib/valve-node/369'", executor.Result{ExitCode: 1, Stderr: "df: cannot access '/var/lib/valve-node/369': No such file or directory"}).
+		// The NEW ancestor-walk command shape.
+		script("while [ ! -d", executor.Result{Stdout: "9999999999999\n", ExitCode: 0}).
+		script("ss -ltn", executor.Result{Stdout: "State  Recv-Q Send-Q Local Address:Port\n", ExitCode: 0})
+	step := preflightStep()
+	if err := step.Verify(context.Background(), e, &State{Wire: w}); err != nil {
+		t.Fatalf("preflight should pass via the ancestor-walk df probe on a fresh box, got %v", err)
+	}
+}
+
+// TestPreflight_DFAncestorWalkNonZeroExitProducesClearError locks in the
+// second half of finding 1: the df command's ExitCode must be checked, and
+// a failure must produce a clear error mentioning DataDir (not a bare
+// "could not parse df output").
+func TestPreflight_DFAncestorWalkNonZeroExitProducesClearError(t *testing.T) {
+	w := testWire()
+	w.DataDir = "/var/lib/valve-node/369"
+	e := newFakeExecutor().
+		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
+		script("while [ ! -d", executor.Result{ExitCode: 1, Stderr: "df: boom"})
+	step := preflightStep()
+	err := step.Verify(context.Background(), e, &State{Wire: w})
+	if err == nil {
+		t.Fatal("want error when the df ancestor-walk command exits non-zero, got nil")
+	}
+	if !strings.Contains(err.Error(), w.DataDir) {
+		t.Fatalf("error %q does not mention the DataDir path", err)
+	}
+}
+
 func TestPreflight_PassesWhenAllOK(t *testing.T) {
 	e := newFakeExecutor().
 		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
@@ -227,6 +269,35 @@ func TestWire_WritesJwtOnlyIfAbsent(t *testing.T) {
 	}
 }
 
+// TestWire_JWTCreationSetsUmaskBeforeWriting locks in finding 3: the JWT
+// secret file must never exist, even momentarily, with the process umask's
+// default (widely-readable) permissions — `umask 077` must be set in the
+// same command before openssl writes the file, not applied after the fact
+// via a following chmod.
+func TestWire_JWTCreationSetsUmaskBeforeWriting(t *testing.T) {
+	w := testWire()
+	e := newFakeExecutor().
+		script("test -f '/mnt/reth/jwt.hex'", executor.Result{ExitCode: 1}). // absent
+		script("umask 077 && mkdir -p", executor.Result{ExitCode: 0}).
+		script("systemctl daemon-reload", executor.Result{ExitCode: 0})
+
+	step := wireStep()
+	st := &State{Wire: w, Events: make(chan Event, 100)}
+	if err := step.Run(context.Background(), e, st); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	found := false
+	for _, c := range e.callLog() {
+		if strings.HasPrefix(c, "umask 077 && ") && strings.Contains(c, "openssl rand -hex 32") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("jwt creation command did not set umask 077 before writing the secret; calls = %v", e.callLog())
+	}
+}
+
 func TestWire_SkipsJwtWriteWhenAlreadyPresent(t *testing.T) {
 	w := testWire()
 	e := newFakeExecutor().
@@ -301,6 +372,59 @@ func TestHandshake_FailureIncludesOffendingLogLines(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "401 Unauthorized: bad jwt") {
 		t.Fatalf("error does not embed the offending journalctl line: %v", err)
+	}
+}
+
+// TestHandshake_BeaconProbeNonZeroExitTreatedAsNotUpYet locks in finding 5:
+// the beacon syncing curl's ExitCode must be checked. A transport-level
+// curl failure (e.g. connection refused) must be treated as "not up yet"
+// even if Stdout happens to read "200" (curl's -w format string is written
+// regardless of transport success), and the error must carry exit/stderr
+// context.
+func TestHandshake_BeaconProbeNonZeroExitTreatedAsNotUpYet(t *testing.T) {
+	e := newFakeExecutor().
+		script("eth/v1/node/syncing", executor.Result{Stdout: "200", ExitCode: 7, Stderr: "curl: (7) Failed to connect"}).
+		script("eth_syncing", executor.Result{Stdout: `{"jsonrpc":"2.0","id":1,"result":false}`}).
+		script("journalctl -u valve-node-beacon.service", executor.Result{Stdout: "ok\n"})
+
+	err := handshakeCheck(context.Background(), e, testWire(), nil)
+	if err == nil {
+		t.Fatal("want error when the beacon curl exits non-zero, even if stdout happens to read 200")
+	}
+	if !strings.Contains(err.Error(), "7") || !strings.Contains(err.Error(), "Failed to connect") {
+		t.Fatalf("error should embed exit code and stderr context: %v", err)
+	}
+}
+
+// TestHandshake_ExecProbeNonZeroExitTreatedAsNotUpYet mirrors the beacon
+// case for the execution client's eth_syncing curl probe.
+func TestHandshake_ExecProbeNonZeroExitTreatedAsNotUpYet(t *testing.T) {
+	e := newFakeExecutor().
+		script("eth/v1/node/syncing", executor.Result{Stdout: "200"}).
+		script("eth_syncing", executor.Result{Stdout: `{"jsonrpc":"2.0","id":1,"result":false}`, ExitCode: 7, Stderr: "curl: (7) Failed to connect"}).
+		script("journalctl -u valve-node-beacon.service", executor.Result{Stdout: "ok\n"})
+
+	err := handshakeCheck(context.Background(), e, testWire(), nil)
+	if err == nil {
+		t.Fatal("want error when the exec curl exits non-zero, even if stdout looks like a valid RPC answer")
+	}
+	if !strings.Contains(err.Error(), "7") || !strings.Contains(err.Error(), "Failed to connect") {
+		t.Fatalf("error should embed exit code and stderr context: %v", err)
+	}
+}
+
+// TestHandshake_JournalctlNonZeroExitDoesNotFailHandshake locks in the
+// second half of finding 5: journalctl legitimately exits non-zero (e.g. a
+// grep-filtered pipeline with no matching lines) — that must read as "no
+// lines", not a handshake failure.
+func TestHandshake_JournalctlNonZeroExitDoesNotFailHandshake(t *testing.T) {
+	e := newFakeExecutor().
+		script("eth/v1/node/syncing", executor.Result{Stdout: "200"}).
+		script("eth_syncing", executor.Result{Stdout: `{"jsonrpc":"2.0","id":1,"result":false}`}).
+		script("journalctl -u valve-node-beacon.service", executor.Result{Stdout: "", ExitCode: 1})
+
+	if err := handshakeCheck(context.Background(), e, testWire(), nil); err != nil {
+		t.Fatalf("journalctl exiting non-zero with no matched lines should not fail handshake: %v", err)
 	}
 }
 

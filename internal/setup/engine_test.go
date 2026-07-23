@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/valve-tech/valve-node/internal/executor"
 )
@@ -172,6 +173,68 @@ func TestRunAll_MarkerProbeSkipsRun(t *testing.T) {
 		if strings.Contains(c, "echo installing") {
 			t.Fatalf("install command executed despite marker probe success: %v", e.callLog())
 		}
+	}
+}
+
+// TestRunAll_NilRunFailedVerifyIsTerminalNotDoubleChecked locks in finding
+// 4: a step with no Run (preflight-shaped: Verify is both the pre-check and
+// the only check there is) must call Verify exactly once on failure. RunAll
+// must not fall through to a redundant post-Run Verify call when there is
+// no Run to have changed anything.
+func TestRunAll_NilRunFailedVerifyIsTerminalNotDoubleChecked(t *testing.T) {
+	verifyCalls := 0
+	step := Step{
+		ID: "preflight",
+		Verify: func(ctx context.Context, e executor.Executor, st *State) error {
+			verifyCalls++
+			return errors.New("preflight failed")
+		},
+	}
+	events := make(chan Event, 10)
+	st := &State{Events: events}
+
+	err := RunAll(context.Background(), newFakeExecutor(), []Step{step}, st)
+	if err == nil {
+		t.Fatal("RunAll: want error, got nil")
+	}
+	if verifyCalls != 1 {
+		t.Fatalf("Verify called %d times for a Run==nil step, want exactly 1 (no redundant re-check)", verifyCalls)
+	}
+}
+
+// TestRunAll_EmitIsCtxAwareAndDoesNotDeadlockOnStalledConsumer locks in
+// finding 2: emit's send on st.Events must be ctx-aware. With an unbuffered
+// Events channel that nobody drains, RunAll must still return promptly once
+// ctx is canceled instead of blocking forever on the engine's own
+// completion-event send.
+func TestRunAll_EmitIsCtxAwareAndDoesNotDeadlockOnStalledConsumer(t *testing.T) {
+	events := make(chan Event) // unbuffered, nobody reads it
+	st := &State{Events: events}
+	step := Step{
+		ID: "a",
+		Run: func(ctx context.Context, e executor.Executor, st *State) error {
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunAll(ctx, newFakeExecutor(), []Step{step}, st)
+	}()
+
+	select {
+	case err := <-errCh:
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunAll error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunAll did not return within 2s of ctx cancellation — emit is deadlocking on the stalled consumer")
 	}
 }
 

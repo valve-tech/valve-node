@@ -37,12 +37,13 @@ type State struct {
 
 	// Events is the progress stream. It is send-only and provided by the
 	// caller as an already-buffered channel (steps and the engine send to
-	// it with a plain blocking send — sizing the buffer so that never
-	// blocks meaningfully is the caller's responsibility, e.g. for driving
-	// an SSE stream a reader should be draining it concurrently anyway).
-	// Neither the engine nor any step ever closes Events; the caller owns
-	// its lifecycle and must close it once RunAll returns, if it intends
-	// to range over it.
+	// it — sizing the buffer so that never blocks meaningfully is the
+	// caller's responsibility, e.g. for driving an SSE stream a reader
+	// should be draining it concurrently anyway). Sends made via emit()
+	// are ctx-aware: a stalled consumer never deadlocks RunAll past the
+	// caller's ctx cancellation. Neither the engine nor any step ever
+	// closes Events; the caller owns its lifecycle and must close it once
+	// RunAll returns, if it intends to range over it.
 	Events chan<- Event
 }
 
@@ -57,46 +58,72 @@ type Event struct {
 
 // emit sends ev on st.Events if State/Events is set. Safe to call with a
 // nil State or nil Events (e.g. from tests that don't care about progress
-// output).
-func emit(st *State, ev Event) {
+// output). The send is ctx-aware: if ctx is canceled before a stalled
+// consumer accepts the send, emit gives up and returns ctx.Err() instead of
+// blocking forever.
+func emit(ctx context.Context, st *State, ev Event) error {
 	if st == nil || st.Events == nil {
-		return
+		return nil
 	}
-	st.Events <- ev
+	select {
+	case st.Events <- ev:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // RunAll executes steps in order. For each step: if Verify is set, it is
 // called first as a pre-check; success there means the step's goal state
 // already holds, so Run is skipped and the step is reported done. If
-// Verify is unset or its pre-check fails, Run executes; a Run error stops
-// the chain immediately. After a successful Run, Verify (if set) is called
-// again to confirm the goal state was actually reached — its error also
-// stops the chain, and later steps never execute. Every event emitted
-// carries the originating step's ID.
+// Verify's pre-check fails and the step has no Run, that failure is
+// terminal — there is nothing that could have fixed it, so Verify is not
+// called again. If Verify is unset or its pre-check fails and Run is set,
+// Run executes; a Run error stops the chain immediately. After a
+// successful Run, Verify (if set) is called again to confirm the goal
+// state was actually reached — its error also stops the chain, and later
+// steps never execute. Every event emitted carries the originating step's
+// ID. RunAll also stops promptly, returning ctx's error, if ctx is
+// canceled while an event send is stalled on a non-draining consumer.
 func RunAll(ctx context.Context, e executor.Executor, steps []Step, st *State) error {
 	for _, step := range steps {
 		if step.Verify != nil {
-			if err := step.Verify(ctx, e, st); err == nil {
-				emit(st, Event{StepID: step.ID, Done: true, Line: "already satisfied"})
+			preErr := step.Verify(ctx, e, st)
+			if preErr == nil {
+				if err := emit(ctx, st, Event{StepID: step.ID, Done: true, Line: "already satisfied"}); err != nil {
+					return err
+				}
 				continue
+			}
+			if step.Run == nil {
+				if err := emit(ctx, st, Event{StepID: step.ID, Err: preErr.Error()}); err != nil {
+					return err
+				}
+				return fmt.Errorf("setup: step %q: %w", step.ID, preErr)
 			}
 		}
 
 		if step.Run != nil {
 			if err := step.Run(ctx, e, st); err != nil {
-				emit(st, Event{StepID: step.ID, Err: err.Error()})
+				if eerr := emit(ctx, st, Event{StepID: step.ID, Err: err.Error()}); eerr != nil {
+					return eerr
+				}
 				return fmt.Errorf("setup: step %q: %w", step.ID, err)
 			}
 		}
 
 		if step.Verify != nil {
 			if err := step.Verify(ctx, e, st); err != nil {
-				emit(st, Event{StepID: step.ID, Err: err.Error()})
+				if eerr := emit(ctx, st, Event{StepID: step.ID, Err: err.Error()}); eerr != nil {
+					return eerr
+				}
 				return fmt.Errorf("setup: step %q: verify failed after run: %w", step.ID, err)
 			}
 		}
 
-		emit(st, Event{StepID: step.ID, Done: true})
+		if err := emit(ctx, st, Event{StepID: step.ID, Done: true}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
