@@ -1285,3 +1285,70 @@ func TestSettingsPutMaskedFieldSemantics(t *testing.T) {
 		t.Fatalf("on-disk AIKey after explicit empty aiKey PUT = %q, want empty", onDisk.AIKey)
 	}
 }
+
+// ---------------------------------------------------------------------
+// network diagnostics
+// ---------------------------------------------------------------------
+
+func TestDiagnosticsHappyPath(t *testing.T) {
+	// Same wired combo as the firewall tests (reth/lighthouse-pulse on 369):
+	// every probe is scripted to its healthy answer, so all 10 items pass
+	// (local mode — no inbound dial item).
+	ssTCP := "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port\n" +
+		ssLine("0.0.0.0", 30303) + ssLine("0.0.0.0", 9000) +
+		ssLine("127.0.0.1", 8545) + ssLine("0.0.0.0", 22)
+	ssUDP := "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port\n" +
+		"UNCONN 0 0 0.0.0.0:30303 0.0.0.0:*\nUNCONN 0 0 0.0.0.0:9000 0.0.0.0:*\n"
+
+	a := newAPITestServerWithExecutor(t, func(config.Target) (executor.Executor, error) {
+		e := &scriptedExecutor{}
+		e.script("systemctl is-active", executor.Result{Stdout: "active\nactive\n", ExitCode: 0})
+		e.script("eth_chainId", executor.Result{Stdout: `{"jsonrpc":"2.0","id":1,"result":"0x171"}`, ExitCode: 0})
+		e.script("node/version", executor.Result{Stdout: "200", ExitCode: 0})
+		e.script("ss -ltn", executor.Result{Stdout: ssTCP, ExitCode: 0})
+		e.script("ss -lun", executor.Result{Stdout: ssUDP, ExitCode: 0})
+		e.script("checkpoint.pulsechain.com", executor.Result{ExitCode: 0})
+		e.script("net_peerCount", executor.Result{Stdout: `{"jsonrpc":"2.0","id":1,"result":"0x10"}`, ExitCode: 0})
+		e.script("peer_count", executor.Result{Stdout: `{"data":{"connected":"25"}}`, ExitCode: 0})
+		e.script("eth_syncing", executor.Result{Stdout: `{"jsonrpc":"2.0","id":1,"result":false}`, ExitCode: 0})
+		e.script("node/syncing", executor.Result{Stdout: `{"data":{"head_slot":"1","sync_distance":"0","is_syncing":false}}`, ExitCode: 0})
+		e.script("journalctl", executor.Result{Stdout: "", ExitCode: 0})
+		return e, nil
+	})
+	addAndWireLocalTarget(t, a)
+
+	res := a.do(t, "GET", "/api/targets/local/diagnostics", nil)
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 200, body=%s", res.StatusCode, body)
+	}
+	items := decodeJSON[[]ops.CheckItem](t, res)
+	if len(items) != 10 {
+		t.Fatalf("len(items) = %d, want 10; items = %+v", len(items), items)
+	}
+	for _, it := range items {
+		if it.Status != "pass" {
+			t.Errorf("item %s = %q (%s), want pass", it.ID, it.Status, it.Detail)
+		}
+	}
+}
+
+func TestDiagnosticsOnUnknownTargetIs404(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "GET", "/api/targets/nope/diagnostics", nil)
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", res.StatusCode)
+	}
+}
+
+func TestDiagnosticsRequiresCompletedSetup(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "POST", "/api/targets", config.Target{ID: "local", Mode: "local"})
+	res.Body.Close()
+
+	res = a.do(t, "GET", "/api/targets/local/diagnostics", nil)
+	if res.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 409, body=%s", res.StatusCode, body)
+	}
+}

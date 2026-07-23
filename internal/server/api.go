@@ -409,6 +409,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/targets/{id}/du", s.handleDiskUsage)
 	mux.HandleFunc("GET /api/targets/{id}/endpoints", s.handleEndpoints)
 	mux.HandleFunc("GET /api/targets/{id}/firewall", s.handleFirewall)
+	mux.HandleFunc("GET /api/targets/{id}/diagnostics", s.handleDiagnostics)
 
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
@@ -1163,6 +1164,43 @@ func (s *Server) handleFirewall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	items, err := ops.FirewallChecklist(r.Context(), ex, *target.Wire)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if items == nil {
+		items = []ops.CheckItem{}
+	}
+
+	writeJSON(w, http.StatusOK, items)
+}
+
+// handleDiagnostics runs ops.NetworkDiagnostics — the read-only
+// network-stack troubleshooting ladder — against the target. In SSH mode
+// the target's host is passed through so the suite's inbound probe can
+// dial the public p2p ports from the app host (the real dialer; tests
+// exercise the dial path in the ops package with an injected one).
+func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	target, ok := s.targetWithWire(w, r, id)
+	if !ok {
+		return
+	}
+
+	ex, err := s.getExecutor(target)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	var opts ops.DiagnoseOpts
+	if target.Mode == "ssh" && target.SSH != nil {
+		opts.SSHMode = true
+		opts.SSHHost = target.SSH.Host
+	}
+
+	items, err := ops.NetworkDiagnostics(r.Context(), ex, *target.Wire, opts)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
