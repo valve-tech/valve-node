@@ -22,6 +22,7 @@ import (
 	"github.com/valve-tech/valve-node/internal/executor"
 	"github.com/valve-tech/valve-node/internal/logwatch"
 	"github.com/valve-tech/valve-node/internal/monitor"
+	"github.com/valve-tech/valve-node/internal/ops"
 	"github.com/valve-tech/valve-node/internal/setup"
 )
 
@@ -398,6 +399,16 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/targets/{id}/logs/stream", s.handleLogsStream)
 
 	mux.HandleFunc("POST /api/targets/{id}/explain", s.handleExplain)
+
+	// The literal "clear" segment is more specific than the {action}
+	// wildcard below it and wins for an exact match — Go 1.22+ ServeMux
+	// prefers the more specific pattern regardless of registration order —
+	// so these two don't collide.
+	mux.HandleFunc("POST /api/targets/{id}/services/{svc}/clear", s.handleServiceClear)
+	mux.HandleFunc("POST /api/targets/{id}/services/{svc}/{action}", s.handleServiceAction)
+	mux.HandleFunc("GET /api/targets/{id}/du", s.handleDiskUsage)
+	mux.HandleFunc("GET /api/targets/{id}/endpoints", s.handleEndpoints)
+	mux.HandleFunc("GET /api/targets/{id}/firewall", s.handleFirewall)
 
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
@@ -960,6 +971,182 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, explainResponse{Text: text, SentExcerpt: lines})
+}
+
+// ---------------------------------------------------------------------
+// service control: start/stop/restart, clear, disk usage, endpoints,
+// firewall checklist — all day-2 operator actions from internal/ops,
+// gated on the target existing and having completed setup (Wire != nil).
+// ---------------------------------------------------------------------
+
+// targetWithWire loads cfg, resolves id to a Target, and checks it has
+// completed setup — the shared 404 (unknown target, checked first per the
+// v0.1 review's ordering nit) / 409 (Wire == nil) preamble every route in
+// this section needs before it can touch ops.
+func (s *Server) targetWithWire(w http.ResponseWriter, r *http.Request, id string) (config.Target, bool) {
+	cfg, err := s.loadConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return config.Target{}, false
+	}
+	target, ok := findTarget(cfg, id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "target not found")
+		return config.Target{}, false
+	}
+	if target.Wire == nil {
+		writeError(w, http.StatusConflict, "target has not completed setup")
+		return config.Target{}, false
+	}
+	return target, true
+}
+
+// serviceActionResponse deliberately carries no json tag (like the ops
+// structs it sits alongside) so it encodes as PascalCase {"Active":...},
+// matching the spec's `{Active bool}`.
+type serviceActionResponse struct {
+	Active bool
+}
+
+func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	svc := r.PathValue("svc")
+	action := r.PathValue("action")
+
+	target, ok := s.targetWithWire(w, r, id)
+	if !ok {
+		return
+	}
+
+	ex, err := s.getExecutor(target)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	active, err := ops.ServiceAction(r.Context(), ex, svc, action)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, serviceActionResponse{Active: active})
+}
+
+// clearRequest mirrors serviceActionResponse's untagged-field convention.
+type clearRequest struct {
+	Confirm string
+}
+
+func (s *Server) handleServiceClear(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	svc := r.PathValue("svc")
+
+	target, ok := s.targetWithWire(w, r, id)
+	if !ok {
+		return
+	}
+
+	var req clearRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Confirm != svc {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("confirm must equal service name %q", svc))
+		return
+	}
+
+	ex, err := s.getExecutor(target)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	if err := ops.ClearService(r.Context(), ex, *target.Wire, svc); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
+}
+
+func (s *Server) handleDiskUsage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	target, ok := s.targetWithWire(w, r, id)
+	if !ok {
+		return
+	}
+
+	ex, err := s.getExecutor(target)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	du, err := ops.DiskUsage(r.Context(), ex, *target.Wire)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, du)
+}
+
+func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	target, ok := s.targetWithWire(w, r, id)
+	if !ok {
+		return
+	}
+
+	ex, err := s.getExecutor(target)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	sshMode := target.Mode == "ssh"
+	sshHostHint := ""
+	if sshMode && target.SSH != nil {
+		sshHostHint = fmt.Sprintf("%s@%s", target.SSH.User, target.SSH.Host)
+	}
+
+	ep, err := ops.Endpoints(r.Context(), ex, *target.Wire, sshMode, sshHostHint)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ep)
+}
+
+func (s *Server) handleFirewall(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	target, ok := s.targetWithWire(w, r, id)
+	if !ok {
+		return
+	}
+
+	ex, err := s.getExecutor(target)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	items, err := ops.FirewallChecklist(r.Context(), ex, *target.Wire)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if items == nil {
+		items = []ops.CheckItem{}
+	}
+
+	writeJSON(w, http.StatusOK, items)
 }
 
 // ---------------------------------------------------------------------

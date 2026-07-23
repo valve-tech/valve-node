@@ -19,6 +19,7 @@ import (
 	"github.com/valve-tech/valve-node/internal/catalog"
 	"github.com/valve-tech/valve-node/internal/config"
 	"github.com/valve-tech/valve-node/internal/executor"
+	"github.com/valve-tech/valve-node/internal/ops"
 )
 
 // ---------------------------------------------------------------------
@@ -242,6 +243,11 @@ func TestEveryAPIRouteRequiresToken(t *testing.T) {
 		{"GET", "/api/targets/x/logs"},
 		{"GET", "/api/targets/x/logs/stream"},
 		{"POST", "/api/targets/x/explain"},
+		{"POST", "/api/targets/x/services/exec/start"},
+		{"POST", "/api/targets/x/services/exec/clear"},
+		{"GET", "/api/targets/x/du"},
+		{"GET", "/api/targets/x/endpoints"},
+		{"GET", "/api/targets/x/firewall"},
 		{"GET", "/api/settings"},
 		{"PUT", "/api/settings"},
 	}
@@ -740,6 +746,257 @@ func TestLogsAfterSetupReturnsJSONArray(t *testing.T) {
 	var hits []map[string]any
 	hits = decodeJSON[[]map[string]any](t, res)
 	_ = hits // an empty array is a perfectly valid response; just must decode
+}
+
+// ---------------------------------------------------------------------
+// service control / clear / du / endpoints / firewall
+// ---------------------------------------------------------------------
+
+// addAndWireLocalTarget adds a "local" target and runs setup on it so
+// target.Wire is populated — the precondition every route in this section
+// requires (409 otherwise).
+func addAndWireLocalTarget(t *testing.T, a *apiTestServer) {
+	t.Helper()
+	res := a.do(t, "POST", "/api/targets", config.Target{ID: "local", Mode: "local"})
+	res.Body.Close()
+
+	res = a.do(t, "POST", "/api/targets/local/setup", catalog.WireConfig{
+		ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse", DataDir: "/var/lib/valve-node/369",
+	})
+	if res.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("setup kickoff status = %d, want 202, body=%s", res.StatusCode, body)
+	}
+	res.Body.Close()
+}
+
+func TestServiceActionHappyPath(t *testing.T) {
+	a := newAPITestServer(t)
+	addAndWireLocalTarget(t, a)
+
+	res := a.do(t, "POST", "/api/targets/local/services/exec/start", nil)
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 200, body=%s", res.StatusCode, body)
+	}
+	var body struct {
+		Active bool `json:"Active"`
+	}
+	body = decodeJSON[struct {
+		Active bool `json:"Active"`
+	}](t, res)
+	_ = body // fake executor's default stub determines the value; just must decode
+}
+
+func TestServiceActionOnUnknownTargetIs404(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "POST", "/api/targets/nope/services/exec/start", nil)
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", res.StatusCode)
+	}
+}
+
+func TestServiceActionRequiresCompletedSetup(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "POST", "/api/targets", config.Target{ID: "local", Mode: "local"})
+	res.Body.Close()
+
+	res = a.do(t, "POST", "/api/targets/local/services/exec/start", nil)
+	if res.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 409, body=%s", res.StatusCode, body)
+	}
+}
+
+func TestServiceClearHappyPath(t *testing.T) {
+	a := newAPITestServer(t)
+	addAndWireLocalTarget(t, a)
+
+	res := a.do(t, "POST", "/api/targets/local/services/exec/clear", map[string]any{"Confirm": "exec"})
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 200, body=%s", res.StatusCode, body)
+	}
+}
+
+func TestServiceClearOnUnknownTargetIs404(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "POST", "/api/targets/nope/services/exec/clear", map[string]any{"Confirm": "exec"})
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", res.StatusCode)
+	}
+}
+
+func TestServiceClearRequiresCompletedSetup(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "POST", "/api/targets", config.Target{ID: "local", Mode: "local"})
+	res.Body.Close()
+
+	res = a.do(t, "POST", "/api/targets/local/services/exec/clear", map[string]any{"Confirm": "exec"})
+	if res.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 409, body=%s", res.StatusCode, body)
+	}
+}
+
+func TestServiceClearWrongConfirmIs400(t *testing.T) {
+	a := newAPITestServer(t)
+	addAndWireLocalTarget(t, a)
+
+	res := a.do(t, "POST", "/api/targets/local/services/exec/clear", map[string]any{"Confirm": "beacon"})
+	if res.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 400, body=%s", res.StatusCode, body)
+	}
+}
+
+func TestDiskUsageHappyPath(t *testing.T) {
+	a := newAPITestServer(t)
+	addAndWireLocalTarget(t, a)
+
+	res := a.do(t, "GET", "/api/targets/local/du", nil)
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 200, body=%s", res.StatusCode, body)
+	}
+	du := decodeJSON[ops.DU](t, res)
+	if du.SyncLabel == "" {
+		t.Errorf("du.SyncLabel is empty, want the 369 network's label")
+	}
+}
+
+func TestDiskUsageOnUnknownTargetIs404(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "GET", "/api/targets/nope/du", nil)
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", res.StatusCode)
+	}
+}
+
+func TestDiskUsageRequiresCompletedSetup(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "POST", "/api/targets", config.Target{ID: "local", Mode: "local"})
+	res.Body.Close()
+
+	res = a.do(t, "GET", "/api/targets/local/du", nil)
+	if res.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 409, body=%s", res.StatusCode, body)
+	}
+}
+
+func TestEndpointsHappyPath(t *testing.T) {
+	a := newAPITestServer(t)
+	addAndWireLocalTarget(t, a)
+
+	res := a.do(t, "GET", "/api/targets/local/endpoints", nil)
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 200, body=%s", res.StatusCode, body)
+	}
+	ep := decodeJSON[ops.EndpointInfo](t, res)
+	if ep.Access != "local" {
+		t.Errorf("ep.Access = %q, want local", ep.Access)
+	}
+	if ep.TunnelHint != "" {
+		t.Errorf("ep.TunnelHint = %q, want empty for a local target", ep.TunnelHint)
+	}
+}
+
+func TestEndpointsSSHTargetGetsTunnelHint(t *testing.T) {
+	a := newAPITestServer(t)
+
+	res := a.do(t, "POST", "/api/targets", config.Target{
+		ID:   "box1",
+		Mode: "ssh",
+		SSH: &executor.SSHConfig{
+			Host:    "10.0.0.5",
+			User:    "root",
+			KeyPath: "/home/me/.ssh/id_ed25519",
+		},
+	})
+	if res.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("add ssh target status = %d, want 201, body=%s", res.StatusCode, body)
+	}
+	res.Body.Close()
+
+	res = a.do(t, "POST", "/api/targets/box1/setup", catalog.WireConfig{
+		ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse", DataDir: "/var/lib/valve-node/369",
+	})
+	if res.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("setup kickoff status = %d, want 202, body=%s", res.StatusCode, body)
+	}
+	res.Body.Close()
+
+	res = a.do(t, "GET", "/api/targets/box1/endpoints", nil)
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 200, body=%s", res.StatusCode, body)
+	}
+	ep := decodeJSON[ops.EndpointInfo](t, res)
+	if ep.Access != "ssh" {
+		t.Errorf("ep.Access = %q, want ssh", ep.Access)
+	}
+	if !strings.Contains(ep.TunnelHint, "root@10.0.0.5") {
+		t.Errorf("ep.TunnelHint = %q, want it to contain root@10.0.0.5", ep.TunnelHint)
+	}
+}
+
+func TestEndpointsOnUnknownTargetIs404(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "GET", "/api/targets/nope/endpoints", nil)
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", res.StatusCode)
+	}
+}
+
+func TestEndpointsRequiresCompletedSetup(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "POST", "/api/targets", config.Target{ID: "local", Mode: "local"})
+	res.Body.Close()
+
+	res = a.do(t, "GET", "/api/targets/local/endpoints", nil)
+	if res.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 409, body=%s", res.StatusCode, body)
+	}
+}
+
+func TestFirewallHappyPath(t *testing.T) {
+	a := newAPITestServer(t)
+	addAndWireLocalTarget(t, a)
+
+	res := a.do(t, "GET", "/api/targets/local/firewall", nil)
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 200, body=%s", res.StatusCode, body)
+	}
+	items := decodeJSON[[]ops.CheckItem](t, res)
+	if len(items) == 0 {
+		t.Fatal("firewall checklist is empty")
+	}
+}
+
+func TestFirewallOnUnknownTargetIs404(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "GET", "/api/targets/nope/firewall", nil)
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", res.StatusCode)
+	}
+}
+
+func TestFirewallRequiresCompletedSetup(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "POST", "/api/targets", config.Target{ID: "local", Mode: "local"})
+	res.Body.Close()
+
+	res = a.do(t, "GET", "/api/targets/local/firewall", nil)
+	if res.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 409, body=%s", res.StatusCode, body)
+	}
 }
 
 // ---------------------------------------------------------------------
