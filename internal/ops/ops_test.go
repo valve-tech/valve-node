@@ -406,18 +406,20 @@ func TestEndpoints_LocalAccessNoTunnelHint(t *testing.T) {
 
 func TestEndpoints_SSHAccessIncludesTunnelHint(t *testing.T) {
 	e := newFakeExecutor()
-	ep, err := Endpoints(context.Background(), e, testWire(), true, "203.0.113.5")
+	ep, err := Endpoints(context.Background(), e, testWire(), true, "root@203.0.113.5")
 	if err != nil {
 		t.Fatalf("Endpoints: %v", err)
 	}
 	if ep.Access != "ssh" {
 		t.Errorf("Access = %q, want \"ssh\"", ep.Access)
 	}
-	if !strings.Contains(ep.TunnelHint, "203.0.113.5") {
-		t.Errorf("TunnelHint %q does not mention the host", ep.TunnelHint)
-	}
-	if !strings.Contains(ep.TunnelHint, "8545:127.0.0.1:8545") || !strings.Contains(ep.TunnelHint, "5052:127.0.0.1:5052") {
-		t.Errorf("TunnelHint %q should forward both exec and beacon ports", ep.TunnelHint)
+	// Exact match: the sshLogin argument is the full user@host login,
+	// embedded verbatim — no "root@" is ever prefixed by Endpoints itself
+	// (that was the bug: a hardcoded "root@%s" on top of an
+	// already-user@host-shaped hint produced "root@root@<host>").
+	want := "ssh -L 8545:127.0.0.1:8545 -L 5052:127.0.0.1:5052 root@203.0.113.5"
+	if ep.TunnelHint != want {
+		t.Errorf("TunnelHint = %q, want %q", ep.TunnelHint, want)
 	}
 }
 

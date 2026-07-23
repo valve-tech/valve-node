@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -58,6 +59,40 @@ func (f *autoSucceedExecutor) WriteFile(_ context.Context, _ string, _ []byte, _
 func (f *autoSucceedExecutor) ReadFile(_ context.Context, _ string) ([]byte, error) { return nil, nil }
 
 func (f *autoSucceedExecutor) Close() error { return nil }
+
+// scriptedExecutor is autoSucceedExecutor plus a small set of exact-substring
+// command overrides, for the handful of route happy-path tests that need a
+// deterministic reading (systemctl is-active's stdout, ss/ufw's output)
+// rather than the blanket-success default every other route test relies on.
+// Scripts are checked in order; the first substring match wins, else the
+// embedded autoSucceedExecutor's default behavior applies.
+type scriptedExecutor struct {
+	autoSucceedExecutor
+	scripts []struct {
+		substr string
+		res    executor.Result
+	}
+}
+
+func (f *scriptedExecutor) script(substr string, res executor.Result) *scriptedExecutor {
+	f.scripts = append(f.scripts, struct {
+		substr string
+		res    executor.Result
+	}{substr, res})
+	return f
+}
+
+func (f *scriptedExecutor) Run(ctx context.Context, cmd string, opts *executor.RunOpts) (executor.Result, error) {
+	for _, sc := range f.scripts {
+		if strings.Contains(cmd, sc.substr) {
+			f.mu.Lock()
+			f.calls = append(f.calls, cmd)
+			f.mu.Unlock()
+			return sc.res, nil
+		}
+	}
+	return f.autoSucceedExecutor.Run(ctx, cmd, opts)
+}
 
 // blockingExecutor is a fake executor.Executor for the delete-during-setup
 // test: preflight's own probes (uname/df/ss) succeed immediately so
@@ -147,6 +182,17 @@ type apiTestServer struct {
 
 func newAPITestServer(t *testing.T) *apiTestServer {
 	t.Helper()
+	return newAPITestServerWithExecutor(t, func(config.Target) (executor.Executor, error) {
+		return &autoSucceedExecutor{}, nil
+	})
+}
+
+// newAPITestServerWithExecutor is newAPITestServer with a caller-supplied
+// executor factory, for tests that need a scriptedExecutor instead of the
+// blanket-success default (e.g. asserting a route's response reflects a
+// specific probe reading, not just "the fake didn't error").
+func newAPITestServerWithExecutor(t *testing.T, newExec func(config.Target) (executor.Executor, error)) *apiTestServer {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -158,9 +204,7 @@ func newAPITestServer(t *testing.T) *apiTestServer {
 		UI: fstest.MapFS{
 			"index.html": &fstest.MapFile{Data: []byte("<html>ui</html>")},
 		},
-		NewExecutor: func(config.Target) (executor.Executor, error) {
-			return &autoSucceedExecutor{}, nil
-		},
+		NewExecutor: newExec,
 		NewAIProvider: func(id, _, _ string) (ai.Provider, error) {
 			fake.id = id
 			return fake, nil
@@ -771,7 +815,11 @@ func addAndWireLocalTarget(t *testing.T, a *apiTestServer) {
 }
 
 func TestServiceActionHappyPath(t *testing.T) {
-	a := newAPITestServer(t)
+	a := newAPITestServerWithExecutor(t, func(config.Target) (executor.Executor, error) {
+		e := &scriptedExecutor{}
+		e.script("systemctl is-active valve-node-exec.service", executor.Result{Stdout: "active\n", ExitCode: 0})
+		return e, nil
+	})
 	addAndWireLocalTarget(t, a)
 
 	res := a.do(t, "POST", "/api/targets/local/services/exec/start", nil)
@@ -779,13 +827,12 @@ func TestServiceActionHappyPath(t *testing.T) {
 		body, _ := io.ReadAll(res.Body)
 		t.Fatalf("status = %d, want 200, body=%s", res.StatusCode, body)
 	}
-	var body struct {
-		Active bool `json:"Active"`
-	}
-	body = decodeJSON[struct {
+	body := decodeJSON[struct {
 		Active bool `json:"Active"`
 	}](t, res)
-	_ = body // fake executor's default stub determines the value; just must decode
+	if !body.Active {
+		t.Errorf("Active = false, want true (scripted is-active reports \"active\")")
+	}
 }
 
 func TestServiceActionOnUnknownTargetIs404(t *testing.T) {
@@ -939,8 +986,12 @@ func TestEndpointsSSHTargetGetsTunnelHint(t *testing.T) {
 	if ep.Access != "ssh" {
 		t.Errorf("ep.Access = %q, want ssh", ep.Access)
 	}
-	if !strings.Contains(ep.TunnelHint, "root@10.0.0.5") {
-		t.Errorf("ep.TunnelHint = %q, want it to contain root@10.0.0.5", ep.TunnelHint)
+	// Exact match — guards against ops.Endpoints re-prefixing a hardcoded
+	// "root@" onto the already user@host-shaped hint api.go builds from
+	// target.SSH (the double-prefix bug: "root@root@10.0.0.5").
+	want := "ssh -L 8545:127.0.0.1:8545 -L 5052:127.0.0.1:5052 root@10.0.0.5"
+	if ep.TunnelHint != want {
+		t.Errorf("ep.TunnelHint = %q, want %q", ep.TunnelHint, want)
 	}
 }
 
@@ -964,8 +1015,30 @@ func TestEndpointsRequiresCompletedSetup(t *testing.T) {
 	}
 }
 
+// ssLine renders one `ss -ltn`/`ss -lun` listening-socket line for addr:port,
+// matching the format ops.bindState parses.
+func ssLine(addr string, port int) string {
+	return fmt.Sprintf("LISTEN 0 128 %s:%d 0.0.0.0:*\n", addr, port)
+}
+
 func TestFirewallHappyPath(t *testing.T) {
-	a := newAPITestServer(t)
+	// addAndWireLocalTarget wires reth/lighthouse-pulse on chain 369, whose
+	// default ports are: exec HTTP 8545, engine 8551, beacon HTTP 5052, exec
+	// p2p 30303, beacon p2p 9000/9000 — every port here is scripted wide-open
+	// (p2p) or loopback-only (RPC/engine) so all 5 checklist items read
+	// "pass" deterministically.
+	ssTCP := "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port\n" +
+		ssLine("0.0.0.0", 30303) + ssLine("0.0.0.0", 9000) +
+		ssLine("127.0.0.1", 8545) + ssLine("127.0.0.1", 8551) + ssLine("127.0.0.1", 5052) +
+		ssLine("0.0.0.0", 22)
+
+	a := newAPITestServerWithExecutor(t, func(config.Target) (executor.Executor, error) {
+		e := &scriptedExecutor{}
+		e.script("ss -ltn", executor.Result{Stdout: ssTCP, ExitCode: 0})
+		e.script("ss -lun", executor.Result{Stdout: "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port\n", ExitCode: 0})
+		e.script("ufw status", executor.Result{Stdout: "Status: active\n", ExitCode: 0})
+		return e, nil
+	})
 	addAndWireLocalTarget(t, a)
 
 	res := a.do(t, "GET", "/api/targets/local/firewall", nil)
@@ -974,8 +1047,21 @@ func TestFirewallHappyPath(t *testing.T) {
 		t.Fatalf("status = %d, want 200, body=%s", res.StatusCode, body)
 	}
 	items := decodeJSON[[]ops.CheckItem](t, res)
-	if len(items) == 0 {
-		t.Fatal("firewall checklist is empty")
+	if len(items) != 5 {
+		t.Fatalf("len(items) = %d, want 5; items = %+v", len(items), items)
+	}
+
+	var rpcItem *ops.CheckItem
+	for i := range items {
+		if items[i].ID == "rpc-not-public" {
+			rpcItem = &items[i]
+		}
+	}
+	if rpcItem == nil {
+		t.Fatalf("no checklist item with id %q; items = %+v", "rpc-not-public", items)
+	}
+	if rpcItem.Status != "pass" {
+		t.Errorf("rpc-not-public Status = %q, want pass (exec HTTP/engine/beacon HTTP all scripted loopback-only); detail=%q", rpcItem.Status, rpcItem.Detail)
 	}
 }
 

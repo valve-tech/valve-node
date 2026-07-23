@@ -367,7 +367,10 @@ type EndpointInfo struct {
 // over the Executor (i.e. from ON the target box, exactly like the setup
 // handshake does) — these URLs are loopback-bound and unreachable from the
 // app host in SSH mode, so reachability can only ever be checked on-box.
-func Endpoints(ctx context.Context, e executor.Executor, w catalog.WireConfig, sshMode bool, sshHostHint string) (EndpointInfo, error) {
+// sshLogin is the full `user@host` SSH login string (the caller's
+// configured user, never assumed to be "root") embedded verbatim in the
+// returned TunnelHint when sshMode is true; it's ignored otherwise.
+func Endpoints(ctx context.Context, e executor.Executor, w catalog.WireConfig, sshMode bool, sshLogin string) (EndpointInfo, error) {
 	var ep EndpointInfo
 	ep.ExecHTTP = fmt.Sprintf("http://127.0.0.1:%d", w.ExecHTTP())
 	ep.BeaconHTTP = fmt.Sprintf("http://127.0.0.1:%d", w.BeaconHTTP())
@@ -375,8 +378,8 @@ func Endpoints(ctx context.Context, e executor.Executor, w catalog.WireConfig, s
 	if sshMode {
 		ep.Access = "ssh"
 		ep.TunnelHint = fmt.Sprintf(
-			"ssh -L %d:127.0.0.1:%d -L %d:127.0.0.1:%d root@%s",
-			w.ExecHTTP(), w.ExecHTTP(), w.BeaconHTTP(), w.BeaconHTTP(), sshHostHint,
+			"ssh -L %d:127.0.0.1:%d -L %d:127.0.0.1:%d %s",
+			w.ExecHTTP(), w.ExecHTTP(), w.BeaconHTTP(), w.BeaconHTTP(), sshLogin,
 		)
 	} else {
 		ep.Access = "local"
