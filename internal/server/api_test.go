@@ -20,6 +20,8 @@ import (
 	"github.com/valve-tech/valve-node/internal/catalog"
 	"github.com/valve-tech/valve-node/internal/config"
 	"github.com/valve-tech/valve-node/internal/executor"
+	"github.com/valve-tech/valve-node/internal/logwatch"
+	"github.com/valve-tech/valve-node/internal/monitor"
 	"github.com/valve-tech/valve-node/internal/ops"
 )
 
@@ -1317,19 +1319,133 @@ func TestDiagnosticsHappyPath(t *testing.T) {
 	})
 	addAndWireLocalTarget(t, a)
 
+	// Before any run, latest is null.
+	res := a.do(t, "GET", "/api/targets/local/diagnostics/latest", nil)
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("latest status = %d, want 200, body=%s", res.StatusCode, body)
+	}
+	if got := decodeJSON[*DiagReport](t, res); got != nil {
+		t.Fatalf("latest before any run = %+v, want null", got)
+	}
+
+	res = a.do(t, "GET", "/api/targets/local/diagnostics", nil)
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 200, body=%s", res.StatusCode, body)
+	}
+	report := decodeJSON[DiagReport](t, res)
+	if report.Trigger != "manual" {
+		t.Errorf("Trigger = %q, want manual", report.Trigger)
+	}
+	if report.FailedID != "" {
+		t.Errorf("FailedID = %q, want empty on an all-pass ladder", report.FailedID)
+	}
+	if report.At.IsZero() {
+		t.Error("At should be set")
+	}
+	if len(report.Items) != 10 {
+		t.Fatalf("len(Items) = %d, want 10; items = %+v", len(report.Items), report.Items)
+	}
+	for _, it := range report.Items {
+		if it.Status != "pass" {
+			t.Errorf("item %s = %q (%s), want pass", it.ID, it.Status, it.Detail)
+		}
+	}
+
+	// The manual run is stored as latest.
+	res = a.do(t, "GET", "/api/targets/local/diagnostics/latest", nil)
+	latest := decodeJSON[*DiagReport](t, res)
+	if latest == nil || latest.Trigger != "manual" || len(latest.Items) != 10 {
+		t.Fatalf("latest after manual run = %+v, want the stored manual report", latest)
+	}
+}
+
+// TestDiagnosticsLadderReportsFailurePoint locks in the "check check check,
+// failed here" shape end-to-end: with the exec RPC scripted dead, the
+// report stops at diag-exec-rpc and names it in FailedID.
+func TestDiagnosticsLadderReportsFailurePoint(t *testing.T) {
+	a := newAPITestServerWithExecutor(t, func(config.Target) (executor.Executor, error) {
+		e := &scriptedExecutor{}
+		e.script("systemctl is-active", executor.Result{Stdout: "active\nactive\n", ExitCode: 0})
+		e.script("eth_chainId", executor.Result{ExitCode: 7})
+		return e, nil
+	})
+	addAndWireLocalTarget(t, a)
+
 	res := a.do(t, "GET", "/api/targets/local/diagnostics", nil)
 	if res.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(res.Body)
 		t.Fatalf("status = %d, want 200, body=%s", res.StatusCode, body)
 	}
-	items := decodeJSON[[]ops.CheckItem](t, res)
-	if len(items) != 10 {
-		t.Fatalf("len(items) = %d, want 10; items = %+v", len(items), items)
+	report := decodeJSON[DiagReport](t, res)
+	if report.FailedID != "diag-exec-rpc" {
+		t.Errorf("FailedID = %q, want diag-exec-rpc", report.FailedID)
 	}
-	for _, it := range items {
-		if it.Status != "pass" {
-			t.Errorf("item %s = %q (%s), want pass", it.ID, it.Status, it.Detail)
-		}
+	if n := len(report.Items); n != 2 {
+		t.Fatalf("len(Items) = %d, want 2 (services pass, exec-rpc fail); items = %+v", n, report.Items)
+	}
+	if last := report.Items[len(report.Items)-1]; last.ID != "diag-exec-rpc" || last.Status != "fail" {
+		t.Errorf("last item = %s/%s, want diag-exec-rpc/fail", last.ID, last.Status)
+	}
+}
+
+// TestDiagGateCooldownAndSingleflight covers the auto-run gate: one run at
+// a time, auto runs rate-limited by the cooldown, manual runs exempt from
+// the cooldown but not from singleflight, and a failed run (endDiag(nil))
+// keeping the previous report.
+func TestDiagGateCooldownAndSingleflight(t *testing.T) {
+	e := &targetEntry{}
+	now := time.Now()
+	if !e.tryBeginDiag(now, true) {
+		t.Fatal("first auto begin should succeed")
+	}
+	if e.tryBeginDiag(now, true) {
+		t.Fatal("second begin while busy must fail")
+	}
+	if e.tryBeginDiag(now, false) {
+		t.Fatal("manual begin while busy must fail")
+	}
+	e.endDiag(&DiagReport{Trigger: "journal: engine-auth"})
+	if e.tryBeginDiag(now.Add(time.Minute), true) {
+		t.Fatal("auto begin inside the cooldown must fail")
+	}
+	if !e.tryBeginDiag(now.Add(time.Minute), false) {
+		t.Fatal("manual begin bypasses the cooldown")
+	}
+	e.endDiag(nil)
+	if got := e.latestDiag(); got == nil || got.Trigger != "journal: engine-auth" {
+		t.Fatalf("endDiag(nil) must keep the previous report, got %+v", got)
+	}
+	if !e.tryBeginDiag(now.Add(1*time.Minute + diagAutoCooldown), true) {
+		t.Fatal("auto begin after the cooldown should succeed")
+	}
+}
+
+func TestDiagTriggerClassification(t *testing.T) {
+	if got := diagTriggerForHit(logwatch.Hit{Severity: "warn", Signature: "low-peer-count"}); got != "" {
+		t.Errorf("warn hit should not trigger, got %q", got)
+	}
+	if got := diagTriggerForHit(logwatch.Hit{Severity: "critical", Signature: "engine-auth"}); got != "journal: engine-auth" {
+		t.Errorf("critical signature trigger = %q", got)
+	}
+	if got := diagTriggerForHit(logwatch.Hit{Severity: "error"}); got != "journal: error line" {
+		t.Errorf("unclassified error trigger = %q", got)
+	}
+
+	healthy := monitor.Snapshot{ExecActive: true, BeaconActive: true, ExecPeers: 8, BeaconPeers: 20}
+	if got := diagTriggerForSnapshot(healthy); got != "" {
+		t.Errorf("healthy snapshot should not trigger, got %q", got)
+	}
+	down := healthy
+	down.ExecActive = false
+	if got := diagTriggerForSnapshot(down); got == "" {
+		t.Error("inactive exec service should trigger")
+	}
+	noPeers := healthy
+	noPeers.BeaconPeers = 0
+	if got := diagTriggerForSnapshot(noPeers); got == "" {
+		t.Error("0 beacon peers should trigger")
 	}
 }
 

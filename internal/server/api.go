@@ -113,6 +113,14 @@ type targetEntry struct {
 	watchStop context.CancelFunc
 
 	setup *setupRun
+
+	// Network-diagnostics state, guarded by its own mutex because auto-run
+	// goroutines touch it while entry.mu may be held by slow executor
+	// dials. See diag.go for the gate semantics.
+	diagMu     sync.Mutex
+	diagLatest *DiagReport
+	diagLast   time.Time
+	diagBusy   bool
 }
 
 // setExec caches ex as entry's executor under entry.mu. handleAddTarget
@@ -283,6 +291,10 @@ func (s *Server) getMonitor(t config.Target, refRPCBase string) (*monitor.Monito
 	mon := monitor.New(monitor.Config{Exec: ex, Wire: *t.Wire, RefRPC: refRPC})
 	ctx, cancel := context.WithCancel(context.Background())
 	mon.Start(ctx)
+	// Auto-diagnostics trigger: failed connections (inactive service, zero
+	// peers) in this monitor's snapshots kick off a background diagnostics
+	// run, gated by the per-target cooldown (diag.go).
+	go s.watchMonitorForDiag(ctx, t, mon)
 	entry.mon = mon
 	entry.monStop = cancel
 	return mon, nil
@@ -304,6 +316,10 @@ func (s *Server) getWatcher(t config.Target) (*logwatch.Watcher, error) {
 	watch := logwatch.New(ex, logUnits)
 	ctx, cancel := context.WithCancel(context.Background())
 	watch.Start(ctx)
+	// Auto-diagnostics trigger: error/critical journal hits kick off a
+	// background diagnostics run, gated by the per-target cooldown
+	// (diag.go).
+	go s.watchLogsForDiag(ctx, t, watch)
 	entry.watch = watch
 	entry.watchStop = cancel
 	return watch, nil
@@ -410,6 +426,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/targets/{id}/endpoints", s.handleEndpoints)
 	mux.HandleFunc("GET /api/targets/{id}/firewall", s.handleFirewall)
 	mux.HandleFunc("GET /api/targets/{id}/diagnostics", s.handleDiagnostics)
+	mux.HandleFunc("GET /api/targets/{id}/diagnostics/latest", s.handleDiagnosticsLatest)
 
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
@@ -1175,11 +1192,11 @@ func (s *Server) handleFirewall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
-// handleDiagnostics runs ops.NetworkDiagnostics — the read-only
-// network-stack troubleshooting ladder — against the target. In SSH mode
-// the target's host is passed through so the suite's inbound probe can
-// dial the public p2p ports from the app host (the real dialer; tests
-// exercise the dial path in the ops package with an injected one).
+// handleDiagnostics runs the network-diagnostics ladder manually (trigger
+// "manual") and stores the result as the target's latest report. Auto runs
+// (journal/monitor triggered — see diag.go) go through the same gate, so a
+// manual click during an in-flight run gets a 409 rather than a duplicate
+// probe storm.
 func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
@@ -1188,28 +1205,33 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ex, err := s.getExecutor(target)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+	entry := s.reg.get(id)
+	if !entry.tryBeginDiag(time.Now(), false) {
+		writeError(w, http.StatusConflict, "a diagnostics run is already in progress for this target")
 		return
 	}
 
-	var opts ops.DiagnoseOpts
-	if target.Mode == "ssh" && target.SSH != nil {
-		opts.SSHMode = true
-		opts.SSHHost = target.SSH.Host
-	}
-
-	items, err := ops.NetworkDiagnostics(r.Context(), ex, *target.Wire, opts)
+	report, err := s.runDiagnostics(r.Context(), target, "manual")
 	if err != nil {
+		entry.endDiag(nil)
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if items == nil {
-		items = []ops.CheckItem{}
+	entry.endDiag(report)
+
+	writeJSON(w, http.StatusOK, report)
+}
+
+// handleDiagnosticsLatest returns the target's most recent diagnostics
+// report — manual or auto-triggered — or JSON null when none has run yet.
+func (s *Server) handleDiagnosticsLatest(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	if _, ok := s.targetWithWire(w, r, id); !ok {
+		return
 	}
 
-	writeJSON(w, http.StatusOK, items)
+	writeJSON(w, http.StatusOK, s.reg.get(id).latestDiag())
 }
 
 // ---------------------------------------------------------------------
