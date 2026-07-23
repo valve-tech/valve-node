@@ -514,3 +514,24 @@ func waitForRecent(t *testing.T, w *Watcher, want int) {
 		}
 	}
 }
+
+func TestClassify_Exported(t *testing.T) {
+	now := time.Now()
+	hit, ok := Classify("valve-node-exec.service", "WARN low peer count: 0 peers", now)
+	if !ok {
+		t.Fatal("want a Hit for a low-peer-count line, got ok=false")
+	}
+	if hit.Signature != "low-peer-count" {
+		t.Fatalf("Signature = %q, want %q", hit.Signature, "low-peer-count")
+	}
+	if hit.Explain == "" {
+		t.Fatal("want a non-empty canned Explain for a named signature")
+	}
+	if hit.Unit != "valve-node-exec.service" || !hit.At.Equal(now) {
+		t.Fatalf("Unit/At not carried through: %+v", hit)
+	}
+
+	if _, ok := Classify("valve-node-exec.service", "INFO imported new chain segment", now); ok {
+		t.Fatal("want ok=false for a benign info line")
+	}
+}

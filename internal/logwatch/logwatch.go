@@ -185,6 +185,13 @@ func (w *Watcher) publish(hit Hit) {
 	}
 }
 
+// Classify is the exported form of classify, for callers outside the
+// tailing machinery (e.g. ops' network diagnostics cross-referencing a
+// one-shot journal dump against the signature table).
+func Classify(unit, line string, now time.Time) (Hit, bool) {
+	return classify(unit, line, now)
+}
+
 // classify matches line against the signature table (first match wins); if
 // none match, an error-ish line (matching an (?i)erro|warn|crit|fatal level
 // word — "erro" rather than "error" so lighthouse-pulse's abbreviated ERRO
