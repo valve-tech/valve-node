@@ -17,6 +17,20 @@ Supported networks:
 - **PulseChain**
 - **PulseChain v4** (testnet)
 
+## v0.2
+
+v0.2 rounds out day-to-day node operation from the same UI: start, stop, and
+restart each service independently, or clear a service's data directory and
+kick off a fresh resync — gated behind a typed confirmation so it can't
+happen by accident. A storage panel compares actual disk usage against
+expected-size estimates per client and network, labeled with rough
+sync-time expectations. An endpoints panel lists each service's local RPC/P2P
+URLs with live reachability checks, plus an SSH tunnel hint for reaching a
+remote target's ports from your own machine. A security section runs a
+probe-backed firewall checklist against the target and only ever *suggests*
+the commands to lock it down — it never runs anything on your behalf. RPC and
+P2P ports are configurable per client instead of fixed at their defaults.
+
 ## Requirements
 
 - The **target** being set up (the box that will run the execution + beacon
