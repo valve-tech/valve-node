@@ -191,6 +191,20 @@ func TestGroqExplainNon200IsError(t *testing.T) {
 	}
 }
 
+func TestGroqExplainEmptyContentIsError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":""}}]}`))
+	}))
+	defer ts.Close()
+
+	p, _ := New("groq", "key", ts.URL)
+	_, err := p.Explain(context.Background(), testReq())
+	if err == nil {
+		t.Fatal("Explain err = nil, want error on empty message content (match ollama's strictness)")
+	}
+}
+
 // ---------------------------------------------------------------------
 // ollama
 // ---------------------------------------------------------------------

@@ -57,7 +57,14 @@ func (f *fakeExecutor) Run(ctx context.Context, cmd string, opts *executor.RunOp
 			}
 		}
 	}
-	return res, nil
+
+	// Real `journalctl -u <unit> -f` blocks until the context is canceled
+	// (or the transport drops); block here too so it doesn't look like Run
+	// returned on its own once the scripted backlog has been replayed —
+	// that would spuriously trip Watcher.tail's retry loop in unrelated
+	// tests.
+	<-ctx.Done()
+	return res, ctx.Err()
 }
 
 func (f *fakeExecutor) WriteFile(ctx context.Context, path string, content []byte, mode fs.FileMode) error {
@@ -156,6 +163,11 @@ func TestClassify(t *testing.T) {
 			name:    "unclassified warn",
 			line:    "WARN unexpected response from peer, dropping connection",
 			wantHit: true, wantSig: "", wantSev: "warn",
+		},
+		{
+			name:    "lighthouse abbreviated ERRO level tag",
+			line:    "Jul 23 06:00:00 ERRO Head is stuck, prune check failed",
+			wantHit: true, wantSig: "", wantSev: "error",
 		},
 	}
 
@@ -383,6 +395,80 @@ func TestUnsubscribeStopsDelivery(t *testing.T) {
 		}
 	case <-time.After(50 * time.Millisecond):
 		// No delivery — correct (channel isn't closed, just no longer fed).
+	}
+}
+
+// ---------------------------------------------------------------------
+// Watcher: tail retry-with-backoff when Run returns for a reason other
+// than ctx cancellation (SSH transport drop, journald restart).
+// ---------------------------------------------------------------------
+
+// retryExec's Run returns immediately (no error) for the first `immediate`
+// calls, then blocks until ctx is done on every call after that —
+// simulating a transport that drops a few times and then holds a stable
+// follow. Used to prove Watcher.tail re-invokes Run rather than giving up
+// after the first non-cancel return.
+type retryExec struct {
+	mu        sync.Mutex
+	immediate int
+	calls     int
+}
+
+func (r *retryExec) Run(ctx context.Context, cmd string, opts *executor.RunOpts) (executor.Result, error) {
+	r.mu.Lock()
+	r.calls++
+	n := r.calls
+	r.mu.Unlock()
+
+	if n <= r.immediate {
+		return executor.Result{}, nil
+	}
+	<-ctx.Done()
+	return executor.Result{}, ctx.Err()
+}
+
+func (r *retryExec) WriteFile(ctx context.Context, path string, content []byte, mode fs.FileMode) error {
+	return nil
+}
+func (r *retryExec) ReadFile(ctx context.Context, path string) ([]byte, error) { return nil, nil }
+func (r *retryExec) Close() error                                              { return nil }
+
+func (r *retryExec) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func TestTailRetriesRunAfterNonCancelReturn(t *testing.T) {
+	re := &retryExec{immediate: 3}
+	w := New(re, []string{"valve-node-exec.service"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.Start(ctx)
+
+	// Run must be re-invoked (>=2 times) while ctx is still alive, proving
+	// a non-cancel return doesn't kill tailing permanently.
+	deadline := time.After(6 * time.Second)
+	for {
+		if re.callCount() >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for Run to be retried, got %d calls", re.callCount())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
+
+	// After cancel, the retry loop must stop: the call count should not
+	// keep climbing.
+	afterCancel := re.callCount()
+	time.Sleep(100 * time.Millisecond)
+	if got := re.callCount(); got > afterCancel+1 {
+		t.Errorf("Run kept being retried after cancel: %d -> %d", afterCancel, got)
 	}
 }
 

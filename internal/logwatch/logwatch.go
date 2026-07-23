@@ -70,14 +70,53 @@ func (w *Watcher) Start(ctx context.Context) {
 	}
 }
 
+// tailBackoffMin/Max bound the delay between re-invoking journalctl after
+// Run returns for any reason other than ctx cancellation (SSH transport
+// drop, journald restart) — doubling from tailBackoffMin up to
+// tailBackoffMax. tailBackoffResetAfter: a Run that stayed up at least that
+// long is treated as having recovered, so the next retry starts back at
+// tailBackoffMin rather than continuing to climb toward the cap.
+const (
+	tailBackoffMin        = 1 * time.Second
+	tailBackoffMax        = 10 * time.Second
+	tailBackoffResetAfter = 30 * time.Second
+)
+
 func (w *Watcher) tail(ctx context.Context, unit string) {
 	// -n 0: don't replay backlog, only new lines from "now". -o cat: raw
 	// message text only, no journald metadata prefix — classification
 	// works directly on the client's own log line.
 	cmd := fmt.Sprintf("journalctl -u %s -f -n 0 --no-pager -o cat", shQuote(unit))
-	_, _ = w.exec.Run(ctx, cmd, &executor.RunOpts{
-		Stream: func(line string) { w.handleLine(unit, line) },
-	})
+
+	backoff := tailBackoffMin
+	for ctx.Err() == nil {
+		start := time.Now()
+		_, _ = w.exec.Run(ctx, cmd, &executor.RunOpts{
+			Stream: func(line string) { w.handleLine(unit, line) },
+		})
+		if ctx.Err() != nil {
+			// Canceled — Run returning is expected, not a failure to retry.
+			return
+		}
+
+		// A Run that survived a while before dropping is treated as a
+		// transient blip on an otherwise-healthy tail, not a persistent
+		// failure — don't keep climbing the backoff for it.
+		if time.Since(start) > tailBackoffResetAfter {
+			backoff = tailBackoffMin
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+
+		backoff *= 2
+		if backoff > tailBackoffMax {
+			backoff = tailBackoffMax
+		}
+	}
 }
 
 func (w *Watcher) handleLine(unit, line string) {
@@ -147,10 +186,11 @@ func (w *Watcher) publish(hit Hit) {
 }
 
 // classify matches line against the signature table (first match wins); if
-// none match, an error-ish line (matching an (?i)error|warn|crit|fatal
-// level word) still produces an unclassified Hit (Signature ""), severity
-// taken from the level word. A benign line with neither yields ok=false —
-// no Hit at all.
+// none match, an error-ish line (matching an (?i)erro|warn|crit|fatal level
+// word — "erro" rather than "error" so lighthouse-pulse's abbreviated ERRO
+// tag is caught too) still produces an unclassified Hit (Signature ""),
+// severity taken from the level word. A benign line with neither yields
+// ok=false — no Hit at all.
 func classify(unit, line string, now time.Time) (Hit, bool) {
 	for _, sig := range signatures {
 		if sig.pattern.MatchString(line) {

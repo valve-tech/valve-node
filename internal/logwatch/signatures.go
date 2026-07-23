@@ -80,8 +80,10 @@ var signatures = []signature{
 // contain more than one level word.
 var (
 	levelCriticalRe = regexp.MustCompile(`(?i)crit|fatal`)
-	levelErrorRe    = regexp.MustCompile(`(?i)error`)
-	levelWarnRe     = regexp.MustCompile(`(?i)warn`)
+	// "erro" (not "error") so lighthouse-pulse's abbreviated ERRO level tag
+	// matches too — "error" still matches since it contains "erro".
+	levelErrorRe = regexp.MustCompile(`(?i)erro`)
+	levelWarnRe  = regexp.MustCompile(`(?i)warn`)
 )
 
 func levelSeverity(line string) (string, bool) {

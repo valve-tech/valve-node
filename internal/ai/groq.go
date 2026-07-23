@@ -86,5 +86,8 @@ func (p *groqProvider) Explain(ctx context.Context, req ExplainRequest) (string,
 	if len(parsed.Choices) == 0 {
 		return "", fmt.Errorf("groq: response had no choices")
 	}
+	if parsed.Choices[0].Message.Content == "" {
+		return "", fmt.Errorf("groq: response had no message content")
+	}
 	return parsed.Choices[0].Message.Content, nil
 }
