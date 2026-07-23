@@ -32,11 +32,14 @@ type DiagnoseOpts struct {
 const inboundDialTimeout = 3 * time.Second
 
 // NetworkDiagnostics runs the network-stack troubleshooting ladder against
-// the target and returns one finding per probe, ordered so the report
-// reads as a diagnosis: services → local RPC/API → p2p listeners →
-// inbound reachability (SSH mode) → outbound connectivity → peers → sync →
-// journal error signatures. Like FirewallChecklist, it NEVER runs a
-// mutating command — every remedy is copy-paste text in a CheckItem's Fix.
+// the target: services → local RPC/API → p2p listeners → inbound
+// reachability (SSH mode) → outbound connectivity → peers → sync → journal
+// error signatures. It is a LADDER, not a survey: checks run in order and
+// the suite stops at the first "fail" — the returned slice ends at the
+// failing rung, which is the root cause the operator should act on
+// ("check, check, check, failed here"). Warns don't stop the ladder. Like
+// FirewallChecklist, it NEVER runs a mutating command — every remedy is
+// copy-paste text in a CheckItem's Fix.
 func NetworkDiagnostics(ctx context.Context, e executor.Executor, w catalog.WireConfig, opts DiagnoseOpts) ([]CheckItem, error) {
 	network, ok := catalog.NetworkByChainID(w.ChainID)
 	if !ok {
@@ -47,11 +50,26 @@ func NetworkDiagnostics(ctx context.Context, e executor.Executor, w catalog.Wire
 		return nil, fmt.Errorf("ops: diagnostics: %w", err)
 	}
 
-	execActive, beaconActive := unitActiveStates(ctx, e)
-	items := []CheckItem{servicesItem(execActive, beaconActive)}
+	var items []CheckItem
+	// add appends the item and reports whether the ladder may continue —
+	// false at the first "fail", so no later (now-pointless) probe runs.
+	add := func(item CheckItem) bool {
+		items = append(items, item)
+		return item.Status != "fail"
+	}
 
-	items = append(items, execRPCItem(ctx, e, w, execActive))
-	items = append(items, beaconAPIItem(ctx, e, w, beaconActive))
+	execActive, beaconActive := unitActiveStates(ctx, e)
+	if !add(servicesItem(execActive, beaconActive)) {
+		return items, nil
+	}
+	// Past this rung both services are active — later probes can treat an
+	// unanswered RPC/API as its own finding, not a service-down echo.
+	if !add(execRPCItem(ctx, e, w)) {
+		return items, nil
+	}
+	if !add(beaconAPIItem(ctx, e, w)) {
+		return items, nil
+	}
 
 	tcpRes, tcpErr := e.Run(ctx, "ss -ltn", nil)
 	udpRes, udpErr := e.Run(ctx, "ss -lun", nil)
@@ -61,20 +79,34 @@ func NetworkDiagnostics(ctx context.Context, e executor.Executor, w catalog.Wire
 	if udpErr != nil {
 		return nil, fmt.Errorf("ops: diagnostics: ss -lun: %w", udpErr)
 	}
-	items = append(items,
-		p2pOpenItem("exec-p2p-open", "Execution p2p port reachable", w.ExecP2P(), w.ExecP2P(), tcpRes.Stdout, udpRes.Stdout),
-		p2pOpenItem("beacon-p2p-open", "Beacon p2p port reachable", beaconPorts.TCP, beaconPorts.UDP, tcpRes.Stdout, udpRes.Stdout),
-	)
-
-	if opts.SSHMode && opts.SSHHost != "" {
-		items = append(items, inboundItem(opts, w.ExecP2P(), beaconPorts.TCP))
+	// p2pOpenItem never fails (pass/warn/unknown), but keep the ladder
+	// idiom uniform anyway.
+	if !add(p2pOpenItem("exec-p2p-open", "Execution p2p port reachable", w.ExecP2P(), w.ExecP2P(), tcpRes.Stdout, udpRes.Stdout)) {
+		return items, nil
+	}
+	if !add(p2pOpenItem("beacon-p2p-open", "Beacon p2p port reachable", beaconPorts.TCP, beaconPorts.UDP, tcpRes.Stdout, udpRes.Stdout)) {
+		return items, nil
 	}
 
-	items = append(items, outboundItem(ctx, e, network.CheckpointURL))
-	items = append(items, execPeersItem(ctx, e, w, execActive))
-	items = append(items, beaconPeersItem(ctx, e, w, beaconActive))
-	items = append(items, syncItem(ctx, e, w, execActive, beaconActive))
-	items = append(items, journalItem(ctx, e))
+	if opts.SSHMode && opts.SSHHost != "" {
+		if !add(inboundItem(opts, w.ExecP2P(), beaconPorts.TCP)) {
+			return items, nil
+		}
+	}
+
+	if !add(outboundItem(ctx, e, network.CheckpointURL)) {
+		return items, nil
+	}
+	if !add(execPeersItem(ctx, e, w)) {
+		return items, nil
+	}
+	if !add(beaconPeersItem(ctx, e, w)) {
+		return items, nil
+	}
+	if !add(syncItem(ctx, e, w)) {
+		return items, nil
+	}
+	add(journalItem(ctx, e))
 	return items, nil
 }
 
@@ -121,7 +153,7 @@ func servicesItem(execActive, beaconActive bool) CheckItem {
 	}
 }
 
-func execRPCItem(ctx context.Context, e executor.Executor, w catalog.WireConfig, execActive bool) CheckItem {
+func execRPCItem(ctx context.Context, e executor.Executor, w catalog.WireConfig) CheckItem {
 	why := "The execution client's local JSON-RPC is how everything (the beacon client's engine calls aside) " +
 		"talks to your node — if it doesn't answer on loopback, the client is down, still starting, or misconfigured."
 	addr := fmt.Sprintf("http://127.0.0.1:%d", w.ExecHTTP())
@@ -144,10 +176,6 @@ func execRPCItem(ctx context.Context, e executor.Executor, w catalog.WireConfig,
 		}
 	}
 
-	if !execActive {
-		return CheckItem{ID: "diag-exec-rpc", Title: "Execution RPC answering", Why: why,
-			Status: "unknown", Detail: "not probed meaningfully — the execution service isn't running (see the services check)"}
-	}
 	return CheckItem{ID: "diag-exec-rpc", Title: "Execution RPC answering", Why: why,
 		Status: "fail",
 		Detail: fmt.Sprintf("the execution service is running but %s did not answer eth_chainId — likely still starting up (large chains can take minutes) or crashed mid-start", addr),
@@ -155,7 +183,7 @@ func execRPCItem(ctx context.Context, e executor.Executor, w catalog.WireConfig,
 	}
 }
 
-func beaconAPIItem(ctx context.Context, e executor.Executor, w catalog.WireConfig, beaconActive bool) CheckItem {
+func beaconAPIItem(ctx context.Context, e executor.Executor, w catalog.WireConfig) CheckItem {
 	why := "The beacon client's local HTTP API is where sync and peer state come from — " +
 		"if it doesn't answer on loopback, the client is down, still starting, or misconfigured."
 	addr := fmt.Sprintf("http://127.0.0.1:%d", w.BeaconHTTP())
@@ -164,10 +192,6 @@ func beaconAPIItem(ctx context.Context, e executor.Executor, w catalog.WireConfi
 	if err == nil && res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "200" {
 		return CheckItem{ID: "diag-beacon-api", Title: "Beacon API answering", Why: why,
 			Status: "pass", Detail: addr + "/eth/v1/node/version returned 200"}
-	}
-	if !beaconActive {
-		return CheckItem{ID: "diag-beacon-api", Title: "Beacon API answering", Why: why,
-			Status: "unknown", Detail: "not probed meaningfully — the beacon service isn't running (see the services check)"}
 	}
 	return CheckItem{ID: "diag-beacon-api", Title: "Beacon API answering", Why: why,
 		Status: "fail",
@@ -245,7 +269,7 @@ func outboundItem(ctx context.Context, e executor.Executor, checkpointURL string
 	}
 }
 
-func execPeersItem(ctx context.Context, e executor.Executor, w catalog.WireConfig, execActive bool) CheckItem {
+func execPeersItem(ctx context.Context, e executor.Executor, w catalog.WireConfig) CheckItem {
 	why := "Peer count is the single clearest signal of p2p health: 0 peers means the node can't sync at all, " +
 		"and a persistently low count usually means the p2p port isn't reachable from the internet."
 	addr := fmt.Sprintf("http://127.0.0.1:%d", w.ExecHTTP())
@@ -261,15 +285,11 @@ func execPeersItem(ctx context.Context, e executor.Executor, w catalog.WireConfi
 					"work through the p2p-port and inbound-reachability checks above")
 		}
 	}
-	if !execActive {
-		return CheckItem{ID: "diag-exec-peers", Title: "Execution peers", Why: why,
-			Status: "unknown", Detail: "not probed meaningfully — the execution service isn't running (see the services check)"}
-	}
 	return CheckItem{ID: "diag-exec-peers", Title: "Execution peers", Why: why,
 		Status: "unknown", Detail: "the execution RPC did not answer net_peerCount (see the RPC check)"}
 }
 
-func beaconPeersItem(ctx context.Context, e executor.Executor, w catalog.WireConfig, beaconActive bool) CheckItem {
+func beaconPeersItem(ctx context.Context, e executor.Executor, w catalog.WireConfig) CheckItem {
 	why := "The beacon client needs peers to follow the chain; 0 peers means it can't sync, and a low count " +
 		"usually points at an unreachable p2p port."
 	addr := fmt.Sprintf("http://127.0.0.1:%d", w.BeaconHTTP())
@@ -281,10 +301,6 @@ func beaconPeersItem(ctx context.Context, e executor.Executor, w catalog.WireCon
 				"peer discovery can take a few minutes after a (re)start; if the count stays at 0, "+
 					"work through the p2p-port and inbound-reachability checks above")
 		}
-	}
-	if !beaconActive {
-		return CheckItem{ID: "diag-beacon-peers", Title: "Beacon peers", Why: why,
-			Status: "unknown", Detail: "not probed meaningfully — the beacon service isn't running (see the services check)"}
 	}
 	return CheckItem{ID: "diag-beacon-peers", Title: "Beacon peers", Why: why,
 		Status: "unknown", Detail: "the beacon API did not answer /eth/v1/node/peer_count (see the API check)"}
@@ -308,7 +324,7 @@ func peersVerdict(id, title, why string, count, healthy int, lowFix string) Chec
 	}
 }
 
-func syncItem(ctx context.Context, e executor.Executor, w catalog.WireConfig, execActive, beaconActive bool) CheckItem {
+func syncItem(ctx context.Context, e executor.Executor, w catalog.WireConfig) CheckItem {
 	why := "Whether each client considers itself in sync — a node that never leaves 'syncing' despite healthy " +
 		"peers usually has a stalled counterpart (beacon waiting on exec or vice versa) or is simply mid-initial-sync."
 
@@ -331,10 +347,6 @@ func syncItem(ctx context.Context, e executor.Executor, w catalog.WireConfig, ex
 	}
 
 	if !execOK || !beaconOK {
-		if !execActive || !beaconActive {
-			return CheckItem{ID: "diag-sync", Title: "Sync status", Why: why,
-				Status: "unknown", Detail: "not probed meaningfully — a node service isn't running (see the services check)"}
-		}
 		return CheckItem{ID: "diag-sync", Title: "Sync status", Why: why,
 			Status: "unknown", Detail: "could not read sync status from one or both clients (see the RPC/API checks)"}
 	}

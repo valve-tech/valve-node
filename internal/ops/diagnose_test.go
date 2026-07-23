@@ -76,29 +76,31 @@ func TestNetworkDiagnostics_AllHealthy(t *testing.T) {
 	}
 }
 
-func TestNetworkDiagnostics_ServicesDownCascadesUnknown(t *testing.T) {
+// TestNetworkDiagnostics_ServicesDownStopsLadder locks in the ladder
+// contract: the suite runs check-by-check and STOPS at the first failure —
+// with the services down, nothing after diag-services is probed at all.
+func TestNetworkDiagnostics_ServicesDownStopsLadder(t *testing.T) {
 	e := healthyDiagScripts(newFakeExecutor()).
-		script("systemctl is-active", executor.Result{Stdout: "inactive\ninactive\n", ExitCode: 3}).
-		script("eth_chainId", executor.Result{ExitCode: 7}).
-		script("node/version", executor.Result{ExitCode: 7}).
-		script("net_peerCount", executor.Result{ExitCode: 7}).
-		script("peer_count", executor.Result{ExitCode: 7}).
-		script("eth_syncing", executor.Result{ExitCode: 7}).
-		script("node/syncing", executor.Result{ExitCode: 7})
+		script("systemctl is-active", executor.Result{Stdout: "inactive\ninactive\n", ExitCode: 3})
 	items, err := NetworkDiagnostics(context.Background(), e, diagWire(), DiagnoseOpts{})
 	if err != nil {
 		t.Fatalf("NetworkDiagnostics: %v", err)
 	}
-	svc := itemByID(t, items, "diag-services")
-	if svc.Status != "fail" {
-		t.Errorf("diag-services = %q, want fail", svc.Status)
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want the ladder to stop after diag-services: %+v", len(items), items)
+	}
+	svc := items[0]
+	if svc.ID != "diag-services" || svc.Status != "fail" {
+		t.Fatalf("items[0] = %s/%s, want diag-services/fail", svc.ID, svc.Status)
 	}
 	if !strings.Contains(svc.Fix, "systemctl start") || !strings.Contains(svc.Fix, "journalctl") {
 		t.Errorf("diag-services Fix %q should suggest systemctl start + journalctl", svc.Fix)
 	}
-	for _, id := range []string{"diag-exec-rpc", "diag-beacon-api", "diag-exec-peers", "diag-beacon-peers", "diag-sync"} {
-		if got := itemByID(t, items, id).Status; got != "unknown" {
-			t.Errorf("%s = %q, want unknown while services are down", id, got)
+	for _, c := range e.callLog() {
+		for _, probe := range []string{"eth_chainId", "net_peerCount", "ss -ltn", "journalctl"} {
+			if strings.Contains(c, probe) {
+				t.Errorf("probe %q ran after the ladder should have stopped: %q", probe, c)
+			}
 		}
 	}
 }
@@ -119,6 +121,9 @@ func TestNetworkDiagnostics_ZeroExecPeersFails(t *testing.T) {
 	}
 	if it.Fix == "" {
 		t.Error("want a Fix for 0 peers")
+	}
+	if last := items[len(items)-1]; last.ID != "diag-exec-peers" {
+		t.Errorf("ladder should stop at diag-exec-peers, but last item is %s", last.ID)
 	}
 }
 
@@ -152,6 +157,9 @@ func TestNetworkDiagnostics_ChainIDMismatchFails(t *testing.T) {
 	if !strings.Contains(it.Detail, "369") {
 		t.Errorf("Detail %q should mention the expected chain id", it.Detail)
 	}
+	if last := items[len(items)-1]; last.ID != "diag-exec-rpc" {
+		t.Errorf("ladder should stop at diag-exec-rpc, but last item is %s", last.ID)
+	}
 }
 
 func TestNetworkDiagnostics_OutboundFailureModes(t *testing.T) {
@@ -176,6 +184,9 @@ func TestNetworkDiagnostics_OutboundFailureModes(t *testing.T) {
 		}
 		if !strings.Contains(it.Detail, tc.want) {
 			t.Errorf("exit %d: Detail %q should contain %q", tc.exit, it.Detail, tc.want)
+		}
+		if last := items[len(items)-1]; last.ID != "diag-outbound" {
+			t.Errorf("exit %d: ladder should stop at diag-outbound, but last item is %s", tc.exit, last.ID)
 		}
 	}
 }
