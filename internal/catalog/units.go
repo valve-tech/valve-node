@@ -15,17 +15,56 @@ type WireConfig struct {
 	DataDir          string // e.g. /var/lib/valve-node/369
 	JWTPath          string // <DataDir>/jwt.hex
 	Archive          bool
+
+	// ExecHTTPPort, BeaconHTTPPort, and ExecP2PPort are the ports each
+	// client is wired to. Zero value means "use the default" — resolved
+	// via the ExecHTTP/BeaconHTTP/ExecP2P methods below, never read
+	// directly, so config-file backward compat (existing configs with no
+	// port fields at all) keeps working unchanged.
+	ExecHTTPPort   int // default 8545
+	BeaconHTTPPort int // default 5052
+	ExecP2PPort    int // default 30303
+}
+
+// Default ports, applied whenever the corresponding WireConfig field is
+// left at its zero value.
+const (
+	defaultExecHTTPPort   = 8545
+	defaultBeaconHTTPPort = 5052
+	defaultExecP2PPort    = 30303
+)
+
+// ExecHTTP returns the execution client's HTTP RPC port, resolving the
+// zero value to the default (8545).
+func (w WireConfig) ExecHTTP() int {
+	if w.ExecHTTPPort == 0 {
+		return defaultExecHTTPPort
+	}
+	return w.ExecHTTPPort
+}
+
+// BeaconHTTP returns the beacon client's HTTP API port, resolving the zero
+// value to the default (5052).
+func (w WireConfig) BeaconHTTP() int {
+	if w.BeaconHTTPPort == 0 {
+		return defaultBeaconHTTPPort
+	}
+	return w.BeaconHTTPPort
+}
+
+// ExecP2P returns the execution client's devp2p listening port, resolving
+// the zero value to the default (30303).
+func (w WireConfig) ExecP2P() int {
+	if w.ExecP2PPort == 0 {
+		return defaultExecP2PPort
+	}
+	return w.ExecP2PPort
 }
 
 // engineEndpoint is the local engine-API (JSON-RPC over HTTP, JWT-authed)
 // endpoint the beacon client talks to the execution client on. Fixed by
 // the plan decision — always loopback, always 8551.
 const engineEndpoint = "http://127.0.0.1:8551"
-
-// execHTTPPort and beaconHTTPPort are the plan-decided ports for each
-// client's own HTTP RPC API (distinct from the engine endpoint above).
-const execHTTPPort = "8545"
-const beaconHTTPPort = "5052"
 
 const unitTemplate = `[Unit]
 Description=valve-node {{.Description}}
@@ -130,8 +169,8 @@ func execCommand(w WireConfig) (string, error) {
 			return "", fmt.Errorf("catalog: no reth --chain mapping for chain id %d", w.ChainID)
 		}
 		cmd := fmt.Sprintf(
-			"reth node --chain %s --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %s",
-			chain, w.DataDir, w.JWTPath, execHTTPPort,
+			"reth node --chain %s --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %d --port %d",
+			chain, w.DataDir, w.JWTPath, w.ExecHTTP(), w.ExecP2P(),
 		)
 		if !w.Archive {
 			cmd += " --full"
@@ -140,8 +179,8 @@ func execCommand(w WireConfig) (string, error) {
 
 	case "geth":
 		cmd := fmt.Sprintf(
-			"geth --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %s",
-			w.DataDir, w.JWTPath, execHTTPPort,
+			"geth --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %d --port %d",
+			w.DataDir, w.JWTPath, w.ExecHTTP(), w.ExecP2P(),
 		)
 		if w.Archive {
 			cmd += " --gcmode archive"
@@ -154,8 +193,8 @@ func execCommand(w WireConfig) (string, error) {
 		// /usr/local/bin/go-pulse (task-4b BuildCmd), so it's invoked by
 		// that name, not geth's.
 		cmd := fmt.Sprintf(
-			"go-pulse --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %s",
-			w.DataDir, w.JWTPath, execHTTPPort,
+			"go-pulse --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %d --port %d",
+			w.DataDir, w.JWTPath, w.ExecHTTP(), w.ExecP2P(),
 		)
 		switch w.ChainID {
 		case 369:
@@ -180,8 +219,8 @@ func execCommand(w WireConfig) (string, error) {
 			return "", fmt.Errorf("catalog: no erigon-pulse --chain mapping for chain id %d", w.ChainID)
 		}
 		cmd := fmt.Sprintf(
-			"erigon-pulse --chain %s --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %s",
-			chain, w.DataDir, w.JWTPath, execHTTPPort,
+			"erigon-pulse --chain %s --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %d --port %d",
+			chain, w.DataDir, w.JWTPath, w.ExecHTTP(), w.ExecP2P(),
 		)
 		// erigon defaults to archive mode; pruning is opt-in via --prune flags.
 		// erigon-2 full-node convention is --prune=hrtc. A wrong flag fails fast
@@ -210,18 +249,20 @@ func beaconCommand(w WireConfig, net Network) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("catalog: no lighthouse --network mapping for chain id %d", w.ChainID)
 		}
+		datadir := path.Join(w.DataDir, "beacon")
 		cmd := fmt.Sprintf(
-			"%s bn --network %s --datadir %s --execution-endpoint %s --execution-jwt %s --checkpoint-sync-url %s --genesis-beacon-api-url %s --http --http-address 127.0.0.1 --http-port %s",
-			w.BeaconID, network, w.DataDir, engineEndpoint, w.JWTPath, net.CheckpointURL, net.CheckpointURL, beaconHTTPPort,
+			"%s bn --network %s --datadir %s --execution-endpoint %s --execution-jwt %s --checkpoint-sync-url %s --genesis-beacon-api-url %s --http --http-address 127.0.0.1 --http-port %d",
+			w.BeaconID, network, datadir, engineEndpoint, w.JWTPath, net.CheckpointURL, net.CheckpointURL, w.BeaconHTTP(),
 		)
 		return cmd, nil
 
 	case "prysm-pulse":
 		// prysm-pulse installs to /usr/local/bin/prysm-pulse (task-4b
 		// BuildCmd), not the upstream beacon-chain binary name.
+		datadir := path.Join(w.DataDir, "beacondata")
 		cmd := fmt.Sprintf(
-			"prysm-pulse --datadir=%s --execution-endpoint=%s --jwt-secret=%s --checkpoint-sync-url=%s --genesis-beacon-api-url=%s --rpc-host=127.0.0.1 --grpc-gateway-host=127.0.0.1 --grpc-gateway-port=%s",
-			w.DataDir, engineEndpoint, w.JWTPath, net.CheckpointURL, net.CheckpointURL, beaconHTTPPort,
+			"prysm-pulse --datadir=%s --execution-endpoint=%s --jwt-secret=%s --checkpoint-sync-url=%s --genesis-beacon-api-url=%s --rpc-host=127.0.0.1 --grpc-gateway-host=127.0.0.1 --grpc-gateway-port=%d",
+			datadir, engineEndpoint, w.JWTPath, net.CheckpointURL, net.CheckpointURL, w.BeaconHTTP(),
 		)
 		switch w.ChainID {
 		case 369:

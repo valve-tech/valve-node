@@ -14,14 +14,14 @@ import (
 	"github.com/valve-tech/valve-node/internal/executor"
 )
 
-// Ports contract, matching internal/catalog/units.go: exec RPC 127.0.0.1:8545,
-// engine API 127.0.0.1:8551 (JWT-authed, execution<->beacon), beacon HTTP
-// 127.0.0.1:5052.
-const (
-	execHTTPPort   = "8545"
-	enginePort     = "8551"
-	beaconHTTPPort = "5052"
-)
+// Ports contract, matching internal/catalog/units.go: exec RPC defaults to
+// 127.0.0.1:8545, engine API is always 127.0.0.1:8551 (JWT-authed,
+// execution<->beacon, not configurable), beacon HTTP defaults to
+// 127.0.0.1:5052. The exec/beacon HTTP ports are resolved per-WireConfig
+// via WireConfig.ExecHTTP()/BeaconHTTP() (zero value = default) rather than
+// read as constants here, so a custom port setup wires still preflights
+// the right port.
+const enginePort = "8551"
 
 // Unit names/paths on the target, per task-4-brief.md.
 const (
@@ -126,13 +126,13 @@ func preflightCheck(ctx context.Context, e executor.Executor, w catalog.WireConf
 		)
 	}
 
-	exempt := ownActiveUnitPorts(ctx, e)
+	exempt := ownActiveUnitPorts(ctx, e, w)
 
 	res, err = e.Run(ctx, "ss -ltn", nil)
 	if err != nil {
 		return fmt.Errorf("preflight: ss: %w", err)
 	}
-	for _, port := range []string{execHTTPPort, enginePort, beaconHTTPPort} {
+	for _, port := range []string{strconv.Itoa(w.ExecHTTP()), enginePort, strconv.Itoa(w.BeaconHTTP())} {
 		if exempt[port] {
 			continue
 		}
@@ -154,7 +154,7 @@ func preflightCheck(ctx context.Context, e executor.Executor, w catalog.WireConf
 // active, but it still prints one line per unit ("active"/"inactive"/
 // "unknown") in argument order — so the exit code is ignored and only the
 // per-line output is read.
-func ownActiveUnitPorts(ctx context.Context, e executor.Executor) map[string]bool {
+func ownActiveUnitPorts(ctx context.Context, e executor.Executor, w catalog.WireConfig) map[string]bool {
 	exempt := map[string]bool{}
 	res, err := e.Run(ctx, fmt.Sprintf("systemctl is-active %s %s", execUnitName, beaconUnitName), nil)
 	if err != nil {
@@ -162,38 +162,28 @@ func ownActiveUnitPorts(ctx context.Context, e executor.Executor) map[string]boo
 	}
 	lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
 	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "active" {
-		exempt[execHTTPPort] = true
+		exempt[strconv.Itoa(w.ExecHTTP())] = true
 		exempt[enginePort] = true
 	}
 	if len(lines) > 1 && strings.TrimSpace(lines[1]) == "active" {
-		exempt[beaconHTTPPort] = true
+		exempt[strconv.Itoa(w.BeaconHTTP())] = true
 	}
 	return exempt
 }
 
-// chainArchiveSizeTB is the archive-tier dataset size per chain, ported
-// verbatim from packages/web/src/learn/data/networks.ts's
-// snapshot.sizeTB. There is no learn-data source for a full(pruned)-tier
-// minimum; per general operational guidance a pruned full node for these
-// clients runs at roughly half the archive dataset, so the full tier uses
-// half this value. This halving is a reasoned estimate, not a sourced
-// figure — flagged in task-4-report.md.
-var chainArchiveSizeTB = map[int]float64{
-	1:   3.6,
-	369: 3.9,
-	943: 1.2,
-}
-
+// minDiskBytesFor returns the minimum free bytes preflight requires before
+// setup proceeds: catalog.ExpectedBytes' dataset-size estimate for the
+// chain/tier, plus a 10% safety margin. The dataset-size figures
+// themselves (ported verbatim from packages/web/src/learn/data/networks.ts)
+// live in the catalog package — catalog.ExpectedBytes is the single shared
+// implementation; this preflight check is its only other caller.
 func minDiskBytesFor(w catalog.WireConfig) (uint64, error) {
-	sizeTB, ok := chainArchiveSizeTB[w.ChainID]
-	if !ok {
-		return 0, fmt.Errorf("preflight: no disk-size guidance for chain id %d", w.ChainID)
-	}
-	if !w.Archive {
-		sizeTB /= 2
+	expected, err := catalog.ExpectedBytes(w.ChainID, w.Archive)
+	if err != nil {
+		return 0, fmt.Errorf("preflight: %w", err)
 	}
 	const safetyMargin = 1.10 // 10% headroom above the raw dataset size
-	return uint64(sizeTB * 1e12 * safetyMargin), nil
+	return uint64(float64(expected) * safetyMargin), nil
 }
 
 func tierName(archive bool) string {
@@ -530,7 +520,7 @@ func handshakeStep() Step {
 // / offending journal lines) so the caller's error text is exactly what
 // the UI shows — never a bare "handshake failed".
 func handshakeCheck(ctx context.Context, e executor.Executor, w catalog.WireConfig, opts *executor.RunOpts) error {
-	res, err := e.Run(ctx, "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:"+beaconHTTPPort+"/eth/v1/node/syncing", opts)
+	res, err := e.Run(ctx, "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:"+strconv.Itoa(w.BeaconHTTP())+"/eth/v1/node/syncing", opts)
 	if err != nil {
 		return fmt.Errorf("handshake: beacon syncing probe: %w", err)
 	}
@@ -544,7 +534,7 @@ func handshakeCheck(ctx context.Context, e executor.Executor, w catalog.WireConf
 	res, err = e.Run(ctx,
 		`curl -s -X POST -H 'Content-Type: application/json' `+
 			`--data '{"jsonrpc":"2.0","id":1,"method":"eth_syncing","params":[]}' `+
-			`http://127.0.0.1:`+execHTTPPort, opts)
+			`http://127.0.0.1:`+strconv.Itoa(w.ExecHTTP()), opts)
 	if err != nil {
 		return fmt.Errorf("handshake: exec eth_syncing probe: %w", err)
 	}

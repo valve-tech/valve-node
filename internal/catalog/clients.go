@@ -44,7 +44,8 @@ var clients = map[string]Client{
 			`cargo build --release --bin reth && ` +
 			`install -m 0755 target/release/reth /usr/local/bin/reth && ` +
 			`/usr/local/bin/reth --version`,
-		LearnURL: learnBaseURL,
+		LearnURL:    learnBaseURL,
+		DataSubdirs: []string{"db", "static_files"},
 	},
 	"go-pulse": {
 		ID:         "go-pulse",
@@ -58,7 +59,8 @@ var clients = map[string]Client{
 			`cd /tmp/build-go-pulse && ` +
 			`go build -o /usr/local/bin/go-pulse ./cmd/geth && ` +
 			`/usr/local/bin/go-pulse version`,
-		LearnURL: learnBaseURL,
+		LearnURL:    learnBaseURL,
+		DataSubdirs: []string{"geth"},
 	},
 	"erigon-pulse": {
 		ID:         "erigon-pulse",
@@ -72,7 +74,8 @@ var clients = map[string]Client{
 			`cd /tmp/build-erigon-pulse && ` +
 			`go build -o /usr/local/bin/erigon-pulse ./cmd/erigon && ` +
 			`/usr/local/bin/erigon-pulse --version`,
-		LearnURL: learnBaseURL,
+		LearnURL:    learnBaseURL,
+		DataSubdirs: []string{"chaindata", "snapshots"},
 	},
 	"geth": {
 		ID:         "geth",
@@ -86,7 +89,8 @@ var clients = map[string]Client{
 			`cd /tmp/build-geth && ` +
 			`go build -o /usr/local/bin/geth ./cmd/geth && ` +
 			`/usr/local/bin/geth version`,
-		LearnURL: learnBaseURL,
+		LearnURL:    learnBaseURL,
+		DataSubdirs: []string{"geth"},
 	},
 	"lighthouse-pulse": {
 		ID:         "lighthouse-pulse",
@@ -102,7 +106,8 @@ var clients = map[string]Client{
 			`cargo build --release --bin lighthouse && ` +
 			`install -m 0755 target/release/lighthouse /usr/local/bin/lighthouse-pulse && ` +
 			`/usr/local/bin/lighthouse-pulse --version`,
-		LearnURL: learnBaseURL,
+		LearnURL:    learnBaseURL,
+		DataSubdirs: []string{"beacon"},
 	},
 	"prysm-pulse": {
 		ID:         "prysm-pulse",
@@ -116,7 +121,8 @@ var clients = map[string]Client{
 			`cd /tmp/build-prysm-pulse && ` +
 			`go build -o /usr/local/bin/prysm-pulse ./cmd/beacon-chain && ` +
 			`/usr/local/bin/prysm-pulse --version`,
-		LearnURL: learnBaseURL,
+		LearnURL:    learnBaseURL,
+		DataSubdirs: []string{"beacondata"},
 	},
 	"lighthouse": {
 		ID:         "lighthouse",
@@ -132,7 +138,8 @@ var clients = map[string]Client{
 			`cargo build --release --bin lighthouse && ` +
 			`install -m 0755 target/release/lighthouse /usr/local/bin/lighthouse && ` +
 			`/usr/local/bin/lighthouse --version`,
-		LearnURL: learnBaseURL,
+		LearnURL:    learnBaseURL,
+		DataSubdirs: []string{"beacon"},
 	},
 }
 

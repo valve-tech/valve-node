@@ -230,6 +230,82 @@ func TestPreflight_PassesWhenAllOK(t *testing.T) {
 	}
 }
 
+// TestPreflight_CustomPortsAreChecked locks in that preflight's busy-port
+// scan checks the WireConfig's *resolved* ports (via ExecHTTP/BeaconHTTP),
+// not the old hardcoded 8545/5052 constants — a target configured with
+// custom ports must have those exact custom ports checked.
+func TestPreflight_CustomPortsAreChecked(t *testing.T) {
+	w := testWire()
+	w.ExecHTTPPort = 9545
+	w.BeaconHTTPPort = 6052
+	e := rootUIDScript(newFakeExecutor()).
+		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
+		script("df -B1 --output=avail", executor.Result{Stdout: "Avail\n9999999999999\n", ExitCode: 0}).
+		script("ss -ltn", executor.Result{
+			Stdout: "State  Recv-Q Send-Q Local Address:Port\n" +
+				"LISTEN 0 128 127.0.0.1:9545 0.0.0.0:*\n",
+			ExitCode: 0,
+		})
+	step := preflightStep()
+	err := step.Verify(context.Background(), e, &State{Wire: w})
+	if err == nil {
+		t.Fatal("want error on busy custom exec HTTP port 9545, got nil")
+	}
+	if !strings.Contains(err.Error(), "9545") {
+		t.Fatalf("error %q does not mention the custom busy port", err)
+	}
+}
+
+// TestPreflight_DefaultPortsNotFlaggedWhenCustomPortsConfigured is the
+// discriminator for the above: with custom ports configured, a listener on
+// the *old default* port (8545) must NOT trip the busy-port check — proving
+// preflight checks resolved ports, not literal defaults.
+func TestPreflight_DefaultPortsNotFlaggedWhenCustomPortsConfigured(t *testing.T) {
+	w := testWire()
+	w.ExecHTTPPort = 9545
+	w.BeaconHTTPPort = 6052
+	e := rootUIDScript(newFakeExecutor()).
+		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
+		script("df -B1 --output=avail", executor.Result{Stdout: "Avail\n9999999999999\n", ExitCode: 0}).
+		script("ss -ltn", executor.Result{
+			Stdout: "State  Recv-Q Send-Q Local Address:Port\n" +
+				"LISTEN 0 128 127.0.0.1:8545 0.0.0.0:*\n",
+			ExitCode: 0,
+		})
+	step := preflightStep()
+	if err := step.Verify(context.Background(), e, &State{Wire: w}); err != nil {
+		t.Fatalf("want no error (8545 is unused when custom ports are configured), got %v", err)
+	}
+}
+
+// TestMinDiskBytesFor_UsesCatalogExpectedBytes locks in that preflight's
+// disk-size heuristic is the single shared catalog.ExpectedBytes
+// implementation plus a 10% safety margin — not a second, independently
+// maintained copy of the chain->size table (task-1-brief.md).
+func TestMinDiskBytesFor_UsesCatalogExpectedBytes(t *testing.T) {
+	w := testWire() // ChainID 369, Archive false
+	got, err := minDiskBytesFor(w)
+	if err != nil {
+		t.Fatalf("minDiskBytesFor: %v", err)
+	}
+	expected, err := catalog.ExpectedBytes(w.ChainID, w.Archive)
+	if err != nil {
+		t.Fatalf("catalog.ExpectedBytes: %v", err)
+	}
+	want := uint64(float64(expected) * 1.10)
+	if got != want {
+		t.Errorf("minDiskBytesFor(%+v) = %d, want %d (catalog.ExpectedBytes * 1.10 safety margin)", w, got, want)
+	}
+}
+
+func TestMinDiskBytesFor_UnknownChainErrors(t *testing.T) {
+	w := testWire()
+	w.ChainID = 9999
+	if _, err := minDiskBytesFor(w); err == nil {
+		t.Fatal("want error for unknown chain id")
+	}
+}
+
 // ---- install ----
 
 func TestInstall_SourceBuild_RunsGitCloneBuildCmd(t *testing.T) {

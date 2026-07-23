@@ -408,6 +408,249 @@ func TestClients_BuildCmdMatchesRepo(t *testing.T) {
 	}
 }
 
+// ---- v0.2 Task 1: ports, data subtrees, size data ----
+
+func TestWireConfig_PortDefaults(t *testing.T) {
+	w := WireConfig{}
+	if got := w.ExecHTTP(); got != 8545 {
+		t.Errorf("zero-value WireConfig.ExecHTTP() = %d, want 8545", got)
+	}
+	if got := w.BeaconHTTP(); got != 5052 {
+		t.Errorf("zero-value WireConfig.BeaconHTTP() = %d, want 5052", got)
+	}
+	if got := w.ExecP2P(); got != 30303 {
+		t.Errorf("zero-value WireConfig.ExecP2P() = %d, want 30303", got)
+	}
+}
+
+func TestWireConfig_PortResolversHonorNonZeroFields(t *testing.T) {
+	w := WireConfig{ExecHTTPPort: 9545, BeaconHTTPPort: 6052, ExecP2PPort: 40303}
+	if got := w.ExecHTTP(); got != 9545 {
+		t.Errorf("ExecHTTP() = %d, want 9545", got)
+	}
+	if got := w.BeaconHTTP(); got != 6052 {
+		t.Errorf("BeaconHTTP() = %d, want 6052", got)
+	}
+	if got := w.ExecP2P(); got != 40303 {
+		t.Errorf("ExecP2P() = %d, want 40303", got)
+	}
+}
+
+// beaconHTTPPortToken returns the exact rendered-unit flag token a beacon
+// client's own family uses for its HTTP API port, given the resolved port
+// number — every family but prysm shares "--http-port N"; prysm uses
+// "--grpc-gateway-port=N".
+func beaconHTTPPortToken(beaconID string, port int) string {
+	if beaconID == "prysm-pulse" {
+		return fmt.Sprintf("--grpc-gateway-port=%d", port)
+	}
+	return fmt.Sprintf("--http-port %d", port)
+}
+
+// TestRenderUnits_PortsDefaultAndCustom is a golden test, for every valid
+// exec+beacon combo in the catalog, that (1) a zero-value WireConfig
+// renders the documented defaults (8545/5052/30303) and (2) a WireConfig
+// with all three ports set renders those exact custom values — and that
+// the old default values are nowhere in the custom-ports render (proving
+// the fields are actually threaded through, not just accidentally always
+// matching the default).
+func TestRenderUnits_PortsDefaultAndCustom(t *testing.T) {
+	for _, net := range Networks() {
+		net := net
+		for _, execID := range net.ExecClients {
+			for _, beaconID := range net.BeaconClients {
+				execID, beaconID := execID, beaconID
+				t.Run(net.Name+"/"+execID+"+"+beaconID, func(t *testing.T) {
+					base := WireConfig{
+						ChainID:  net.ChainID,
+						ExecID:   execID,
+						BeaconID: beaconID,
+						DataDir:  "/var/lib/valve-node/dir",
+						JWTPath:  "/var/lib/valve-node/dir/jwt.hex",
+					}
+
+					execUnit, beaconUnit, err := RenderUnits(base)
+					if err != nil {
+						t.Fatalf("RenderUnits(defaults) error: %v", err)
+					}
+					if !strings.Contains(execUnit, "--http.port 8545") {
+						t.Errorf("default exec unit missing --http.port 8545:\n%s", execUnit)
+					}
+					if !strings.Contains(execUnit, "--port 30303") {
+						t.Errorf("default exec unit missing --port 30303:\n%s", execUnit)
+					}
+					if !strings.Contains(beaconUnit, beaconHTTPPortToken(beaconID, 5052)) {
+						t.Errorf("default beacon unit missing %q:\n%s", beaconHTTPPortToken(beaconID, 5052), beaconUnit)
+					}
+
+					custom := base
+					custom.ExecHTTPPort = 9545
+					custom.BeaconHTTPPort = 6052
+					custom.ExecP2PPort = 40303
+					execUnit2, beaconUnit2, err := RenderUnits(custom)
+					if err != nil {
+						t.Fatalf("RenderUnits(custom) error: %v", err)
+					}
+					if !strings.Contains(execUnit2, "--http.port 9545") {
+						t.Errorf("custom exec unit missing --http.port 9545:\n%s", execUnit2)
+					}
+					if !strings.Contains(execUnit2, "--port 40303") {
+						t.Errorf("custom exec unit missing --port 40303:\n%s", execUnit2)
+					}
+					if !strings.Contains(beaconUnit2, beaconHTTPPortToken(beaconID, 6052)) {
+						t.Errorf("custom beacon unit missing %q:\n%s", beaconHTTPPortToken(beaconID, 6052), beaconUnit2)
+					}
+					if strings.Contains(execUnit2, "8545") || strings.Contains(execUnit2, "30303") {
+						t.Errorf("custom exec unit still contains a default port:\n%s", execUnit2)
+					}
+					if strings.Contains(beaconUnit2, "5052") {
+						t.Errorf("custom beacon unit still contains default port 5052:\n%s", beaconUnit2)
+					}
+
+					// engine 8551 is always literal regardless of custom ports.
+					if !strings.Contains(execUnit2, "8551") || !strings.Contains(beaconUnit2, "8551") {
+						t.Errorf("engine port 8551 must stay literal even with custom ports")
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestClients_DataSubdirsAgreeWithRenderedUnits is the per-client
+// template/DataSubdirs agreement test called for in task-1-brief.md: every
+// client's DataSubdirs must be non-empty, and the rendered unit must
+// either point its --datadir flag directly at the owned subdir (the
+// prysm/lighthouse families, which own exactly one subtree) or use a bare
+// --datadir <DataDir> that leaves the subtree(s) as implicit children
+// (reth/erigon/geth-family, which each own one or more subtrees the
+// client itself creates under a shared datadir).
+func TestClients_DataSubdirsAgreeWithRenderedUnits(t *testing.T) {
+	cases := []struct {
+		clientID string
+		w        WireConfig
+		isBeacon bool
+	}{
+		{"reth", WireConfig{ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse", DataDir: "/data", JWTPath: "/data/jwt.hex"}, false},
+		{"geth", WireConfig{ChainID: 1, ExecID: "geth", BeaconID: "lighthouse", DataDir: "/data", JWTPath: "/data/jwt.hex"}, false},
+		{"go-pulse", WireConfig{ChainID: 369, ExecID: "go-pulse", BeaconID: "lighthouse-pulse", DataDir: "/data", JWTPath: "/data/jwt.hex"}, false},
+		{"erigon-pulse", WireConfig{ChainID: 369, ExecID: "erigon-pulse", BeaconID: "lighthouse-pulse", DataDir: "/data", JWTPath: "/data/jwt.hex"}, false},
+		{"lighthouse-pulse", WireConfig{ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse", DataDir: "/data", JWTPath: "/data/jwt.hex"}, true},
+		{"prysm-pulse", WireConfig{ChainID: 369, ExecID: "reth", BeaconID: "prysm-pulse", DataDir: "/data", JWTPath: "/data/jwt.hex"}, true},
+		{"lighthouse", WireConfig{ChainID: 1, ExecID: "reth", BeaconID: "lighthouse", DataDir: "/data", JWTPath: "/data/jwt.hex"}, true},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.clientID, func(t *testing.T) {
+			c, ok := ClientByID(tc.clientID)
+			if !ok {
+				t.Fatalf("ClientByID(%q) not found", tc.clientID)
+			}
+			if len(c.DataSubdirs) == 0 {
+				t.Fatalf("client %q has empty DataSubdirs", tc.clientID)
+			}
+
+			execUnit, beaconUnit, err := RenderUnits(tc.w)
+			if err != nil {
+				t.Fatalf("RenderUnits: %v", err)
+			}
+			unit := execUnit
+			if tc.isBeacon {
+				unit = beaconUnit
+			}
+
+			if tc.isBeacon {
+				// Single owned subtree: the datadir flag must point
+				// directly at DataDir/<subdir>.
+				want := tc.w.DataDir + "/" + c.DataSubdirs[0]
+				if !strings.Contains(unit, want) {
+					t.Errorf("client %q unit does not point --datadir at owned subtree %q:\n%s", tc.clientID, want, unit)
+				}
+				return
+			}
+
+			// Exec family: a bare --datadir <DataDir> (not redirected into
+			// any owned subtree — the subtree(s) are implicit children the
+			// client itself creates).
+			bareDatadir := "--datadir " + tc.w.DataDir + " "
+			if !strings.Contains(unit+" ", bareDatadir) {
+				t.Errorf("client %q unit does not use bare %q (implicit subtree):\n%s", tc.clientID, bareDatadir, unit)
+			}
+			for _, sub := range c.DataSubdirs {
+				bad := "--datadir " + tc.w.DataDir + "/" + sub
+				if strings.Contains(unit, bad) {
+					t.Errorf("client %q unit unexpectedly redirects --datadir into owned subtree %q (should be implicit):\n%s", tc.clientID, bad, unit)
+				}
+			}
+		})
+	}
+}
+
+// TestNetworks_SizeAndSyncLabels locks in the size/label data ported
+// verbatim from packages/web/src/learn/data/networks.ts, per the interface
+// block in task-1-brief.md.
+func TestNetworks_SizeAndSyncLabels(t *testing.T) {
+	cases := []struct {
+		chainID          int
+		archiveSizeTB    float64
+		syncLabel        string
+		genesisSyncLabel string
+	}{
+		{369, 3.9, "< 1 day (snapshot)", "~8 days (genesis)"},
+		{943, 1.2, "~4 hrs (snapshot)", "~2 days (genesis)"},
+		{1, 3.6, "~12 hrs (snapshot)", "~10 days (genesis)"},
+	}
+	for _, tc := range cases {
+		net, ok := NetworkByChainID(tc.chainID)
+		if !ok {
+			t.Fatalf("NetworkByChainID(%d) not found", tc.chainID)
+		}
+		if net.ArchiveSizeTB != tc.archiveSizeTB {
+			t.Errorf("chain %d ArchiveSizeTB = %v, want %v", tc.chainID, net.ArchiveSizeTB, tc.archiveSizeTB)
+		}
+		if net.SyncLabel != tc.syncLabel {
+			t.Errorf("chain %d SyncLabel = %q, want %q", tc.chainID, net.SyncLabel, tc.syncLabel)
+		}
+		if net.GenesisSyncLabel != tc.genesisSyncLabel {
+			t.Errorf("chain %d GenesisSyncLabel = %q, want %q", tc.chainID, net.GenesisSyncLabel, tc.genesisSyncLabel)
+		}
+	}
+}
+
+// TestExpectedBytes_MatchesSpec locks in ExpectedBytes' archive and full
+// (half-archive) figures as exact byte counts, ported verbatim from
+// packages/web/src/learn/data/networks.ts's snapshot.sizeTB.
+func TestExpectedBytes_MatchesSpec(t *testing.T) {
+	cases := []struct {
+		chainID   int
+		archive   bool
+		wantBytes uint64
+	}{
+		{369, true, 3_900_000_000_000},
+		{369, false, 1_950_000_000_000},
+		{943, true, 1_200_000_000_000},
+		{943, false, 600_000_000_000},
+		{1, true, 3_600_000_000_000},
+		{1, false, 1_800_000_000_000},
+	}
+	for _, tc := range cases {
+		got, err := ExpectedBytes(tc.chainID, tc.archive)
+		if err != nil {
+			t.Fatalf("ExpectedBytes(%d, %v) error: %v", tc.chainID, tc.archive, err)
+		}
+		if got != tc.wantBytes {
+			t.Errorf("ExpectedBytes(%d, %v) = %d, want %d", tc.chainID, tc.archive, got, tc.wantBytes)
+		}
+	}
+}
+
+func TestExpectedBytes_UnknownChainErrors(t *testing.T) {
+	if _, err := ExpectedBytes(9999, true); err == nil {
+		t.Fatal("ExpectedBytes(9999, true) expected error for unknown chain id, got nil")
+	}
+}
+
 // TestRenderUnits_PulseNetworkSelectorFlags is a golden-value regression
 // test for the go-pulse and prysm-pulse network-selector flags, verified
 // E2E against the actual built binaries' --help on a live box:
