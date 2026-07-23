@@ -58,6 +58,63 @@ func (f *autoSucceedExecutor) ReadFile(_ context.Context, _ string) ([]byte, err
 
 func (f *autoSucceedExecutor) Close() error { return nil }
 
+// blockingExecutor is a fake executor.Executor for the delete-during-setup
+// test: preflight's own probes (uname/df/ss) succeed immediately so
+// setup.RunAll gets past the preflight step, then the next command it runs
+// (toolchain's git probe) blocks until ctx is canceled — simulating a setup
+// step that is still genuinely in flight when a DELETE arrives.
+type blockingExecutor struct {
+	mu       sync.Mutex
+	ranAfter bool // a blocking Run call was actually reached
+	closed   bool
+	ctxErr   error    // ctx.Err() observed by the blocked Run call
+	events   []string // ordering trace: "run-returned", then "closed"
+}
+
+func (b *blockingExecutor) Run(ctx context.Context, cmd string, _ *executor.RunOpts) (executor.Result, error) {
+	switch {
+	case strings.Contains(cmd, "uname"):
+		return executor.Result{Stdout: "Linux\n", ExitCode: 0}, nil
+	case strings.Contains(cmd, "df -B1"):
+		return executor.Result{Stdout: "9999999999999\n", ExitCode: 0}, nil
+	case strings.Contains(cmd, "ss -ltn"):
+		return executor.Result{ExitCode: 0}, nil
+	}
+
+	b.mu.Lock()
+	b.ranAfter = true
+	b.mu.Unlock()
+
+	<-ctx.Done()
+
+	b.mu.Lock()
+	b.ctxErr = ctx.Err()
+	b.events = append(b.events, "run-returned")
+	b.mu.Unlock()
+
+	return executor.Result{}, ctx.Err()
+}
+
+func (b *blockingExecutor) WriteFile(_ context.Context, _ string, _ []byte, _ fs.FileMode) error {
+	return nil
+}
+
+func (b *blockingExecutor) ReadFile(_ context.Context, _ string) ([]byte, error) { return nil, nil }
+
+func (b *blockingExecutor) Close() error {
+	b.mu.Lock()
+	b.closed = true
+	b.events = append(b.events, "closed")
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *blockingExecutor) snapshot() (ranAfter, closed bool, ctxErr error, events []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.ranAfter, b.closed, b.ctxErr, append([]string(nil), b.events...)
+}
+
 // fakeAIProvider is a stub ai.Provider for the explain route.
 type fakeAIProvider struct {
 	id      string
@@ -300,6 +357,67 @@ func TestTargetCRUDRoundTripsAndPersists(t *testing.T) {
 	}
 }
 
+// TestHandleAddTargetExecWriteIsRaceFree exercises handleAddTarget's final
+// entry.exec write concurrently with getExecutor (which every other path —
+// setup/monitor/logs — goes through under entry.mu). This is a white-box
+// test (same package) precisely so the concurrent reader can call
+// s.getExecutor directly rather than needing to round-trip through a route
+// that first requires the target to exist in the on-disk config: both
+// handleAddTarget and s.getExecutor share the same *targetEntry the moment
+// registry.get(id) is called, and config.Load/Save's real file I/O inside
+// handleAddTarget gives the concurrent loop a real (not just adjacent-
+// instruction) window to overlap the unguarded write in. Run with
+// `go test -race`: before the fix (a bare `entry.exec = ex` write) this
+// reliably reports a DATA RACE; after routing through the locked setter,
+// it's clean.
+func TestHandleAddTargetExecWriteIsRaceFree(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	s := New(Config{
+		Token: NewSessionToken(),
+		NewExecutor: func(config.Target) (executor.Executor, error) {
+			return &autoSucceedExecutor{}, nil
+		},
+	})
+
+	target := config.Target{ID: "race-target", Mode: "local"}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// getExecutor locks entry.mu around every read/write of
+			// entry.exec — the same field handleAddTarget's bug wrote to
+			// unlocked.
+			_, _ = s.getExecutor(target)
+		}
+	}()
+
+	body, err := json.Marshal(target)
+	if err != nil {
+		t.Fatalf("marshal target: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/api/targets", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.handleAddTarget(w, req)
+
+	close(stop)
+	wg.Wait()
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestAddSSHTargetRequiresConnectionFields(t *testing.T) {
 	a := newAPITestServer(t)
 
@@ -387,6 +505,121 @@ func TestSetupKickoffOnUnknownTargetIs404(t *testing.T) {
 	res := a.do(t, "POST", "/api/targets/nope/setup", catalog.WireConfig{ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse"})
 	if res.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", res.StatusCode)
+	}
+}
+
+// TestDeleteTargetCancelsInFlightSetupBeforeClosingExecutor is the
+// use-after-close regression test: it kicks off a real setup run against a
+// blockingExecutor, waits for the run to genuinely be blocked mid-step,
+// then DELETEs the target. Before the fix, registry.remove closed the
+// executor immediately, out from under the still-running setup goroutine.
+// After the fix, remove cancels the run's context and waits for the
+// goroutine to finish before closing — so the trace must show
+// "run-returned" strictly before "closed", the blocked Run call must have
+// observed context.Canceled, and DELETE must still return promptly (bounded
+// by setupCancelWait, not hung forever).
+func TestDeleteTargetCancelsInFlightSetupBeforeClosingExecutor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	fake := &blockingExecutor{}
+	token := NewSessionToken()
+	s := New(Config{
+		Token: token,
+		UI: fstest.MapFS{
+			"index.html": &fstest.MapFile{Data: []byte("<html>ui</html>")},
+		},
+		NewExecutor: func(config.Target) (executor.Executor, error) {
+			return fake, nil
+		},
+	})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	doReq := func(method, path string, body any) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(method, ts.URL+path, jsonBody(t, body))
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		return res
+	}
+
+	res := doReq("POST", "/api/targets", config.Target{ID: "local", Mode: "local"})
+	res.Body.Close()
+
+	res = doReq("POST", "/api/targets/local/setup", catalog.WireConfig{
+		ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse", DataDir: "/var/lib/valve-node/369",
+	})
+	if res.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("setup kickoff status = %d, want 202, body=%s", res.StatusCode, body)
+	}
+	res.Body.Close()
+
+	// Wait until the setup goroutine has actually reached the blocking
+	// step (past preflight) — otherwise the delete below wouldn't be
+	// racing a live setup step at all.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if ranAfter, _, _, _ := fake.snapshot(); ranAfter {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for setup to reach the blocking step")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	deleteDone := make(chan struct{})
+	go func() {
+		defer close(deleteDone)
+		res := doReq("DELETE", "/api/targets/local", nil)
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusNoContent {
+			t.Errorf("DELETE status = %d, want 204", res.StatusCode)
+		}
+	}()
+
+	select {
+	case <-deleteDone:
+	case <-time.After(setupCancelWait + 5*time.Second):
+		t.Fatal("DELETE did not return — likely blocked on exec.Close() waiting for the in-flight setup step")
+	}
+
+	ranAfter, closed, ctxErr, events := fake.snapshot()
+	if !ranAfter {
+		t.Fatal("blocking step was never reached")
+	}
+	if ctxErr != context.Canceled {
+		t.Errorf("blocked Run's observed ctx.Err() = %v, want context.Canceled", ctxErr)
+	}
+	if !closed {
+		t.Fatal("executor was never closed")
+	}
+	// toolchainStep's Verify ("git --version") and — since a Verify
+	// pre-check failure with a Run set falls through to Run too — its Run
+	// ("command -v git") both hit the blocking branch, so more than one
+	// "run-returned" is expected; what matters is that every one of them
+	// precedes "closed", never the other way around.
+	if len(events) < 2 {
+		t.Fatalf("event trace = %+v, want at least one run-returned followed by closed", events)
+	}
+	if last := events[len(events)-1]; last != "closed" {
+		t.Fatalf("event trace = %+v, want closed last (executor must be closed only after the setup goroutine finished)", events)
+	}
+	for _, ev := range events[:len(events)-1] {
+		if ev != "run-returned" {
+			t.Fatalf("event trace = %+v, want only run-returned entries before the trailing closed", events)
+		}
 	}
 }
 
@@ -525,6 +758,21 @@ func TestExplainWithNoProviderIs409(t *testing.T) {
 	}
 }
 
+// TestExplainOnUnknownTargetIs404EvenWithoutProvider pins the contract that
+// handleExplain checks target existence before checking whether an AI
+// provider is configured: an unknown target must 404 regardless of
+// settings state, not 409 just because no provider happens to be set up
+// yet either.
+func TestExplainOnUnknownTargetIs404EvenWithoutProvider(t *testing.T) {
+	a := newAPITestServer(t)
+
+	res := a.do(t, "POST", "/api/targets/nope/explain", map[string]any{})
+	if res.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 404, body=%s", res.StatusCode, body)
+	}
+}
+
 func TestExplainWithProviderReturnsTextAndSentExcerpt(t *testing.T) {
 	a := newAPITestServer(t)
 	res := a.do(t, "POST", "/api/targets", config.Target{ID: "local", Mode: "local"})
@@ -606,5 +854,60 @@ func TestSettingsPutStoresKeyGetMasksIt(t *testing.T) {
 	}
 	if onDisk.AIKey != "super-secret" {
 		t.Errorf("on-disk AIKey = %q, want super-secret", onDisk.AIKey)
+	}
+}
+
+// TestSettingsPutMaskedFieldSemantics pins the settingsRequest pointer-field
+// contract: omitting aiKey on a PUT must leave a previously stored key
+// untouched (a client re-PUTting the masked response of a prior GET must
+// not blow the key away), while an explicit empty string must clear it.
+func TestSettingsPutMaskedFieldSemantics(t *testing.T) {
+	a := newAPITestServer(t)
+
+	res := a.do(t, "PUT", "/api/settings", map[string]any{"aiProvider": "groq", "aiKey": "k1"})
+	res.Body.Close()
+
+	res = a.do(t, "GET", "/api/settings", nil)
+	got := decodeJSON[map[string]any](t, res)
+	if got["aiKeySet"] != true {
+		t.Fatalf("aiKeySet after PUT aiKey=k1 = %v, want true", got["aiKeySet"])
+	}
+
+	// Switch provider without mentioning aiKey at all — the stored key
+	// must survive untouched.
+	res = a.do(t, "PUT", "/api/settings", map[string]any{"aiProvider": "gemini"})
+	res.Body.Close()
+
+	res = a.do(t, "GET", "/api/settings", nil)
+	got = decodeJSON[map[string]any](t, res)
+	if got["aiProvider"] != "gemini" {
+		t.Fatalf("aiProvider = %v, want gemini", got["aiProvider"])
+	}
+	if got["aiKeySet"] != true {
+		t.Fatalf("aiKeySet after omitted-aiKey PUT = %v, want still true (key preserved)", got["aiKeySet"])
+	}
+	onDisk, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if onDisk.AIKey != "k1" {
+		t.Fatalf("on-disk AIKey after omitted-aiKey PUT = %q, want unchanged %q", onDisk.AIKey, "k1")
+	}
+
+	// An explicit empty aiKey clears it.
+	res = a.do(t, "PUT", "/api/settings", map[string]any{"aiKey": ""})
+	res.Body.Close()
+
+	res = a.do(t, "GET", "/api/settings", nil)
+	got = decodeJSON[map[string]any](t, res)
+	if got["aiKeySet"] != false {
+		t.Fatalf("aiKeySet after explicit empty aiKey PUT = %v, want false", got["aiKeySet"])
+	}
+	onDisk, err = config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if onDisk.AIKey != "" {
+		t.Fatalf("on-disk AIKey after explicit empty aiKey PUT = %q, want empty", onDisk.AIKey)
 	}
 }

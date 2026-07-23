@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/valve-tech/valve-node/internal/ai"
 	"github.com/valve-tech/valve-node/internal/catalog"
@@ -59,8 +60,16 @@ func (r *registry) get(id string) *targetEntry {
 	return e
 }
 
-// remove evicts id's entry, stopping its monitor/watcher goroutines and
-// closing its cached executor.
+// setupCancelWait bounds how long registry.remove waits for an in-flight
+// setup run to observe cancellation and stop touching the target's
+// executor before remove closes that executor out from under it.
+const setupCancelWait = 5 * time.Second
+
+// remove evicts id's entry, stopping its monitor/watcher goroutines,
+// canceling and waiting (bounded) for any in-flight setup run, and only
+// then closing its cached executor — closing the executor before an
+// in-flight setup.RunAll goroutine has actually stopped using it would be a
+// use-after-close race.
 func (r *registry) remove(id string) {
 	r.mu.Lock()
 	e, ok := r.entries[id]
@@ -71,13 +80,21 @@ func (r *registry) remove(id string) {
 	}
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.monStop != nil {
 		e.monStop()
 	}
 	if e.watchStop != nil {
 		e.watchStop()
 	}
+	run := e.setup
+	e.mu.Unlock()
+
+	if run != nil {
+		run.cancelAndWait(setupCancelWait)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.exec != nil {
 		e.exec.Close()
 	}
@@ -97,6 +114,23 @@ type targetEntry struct {
 	setup *setupRun
 }
 
+// setExec caches ex as entry's executor under entry.mu. handleAddTarget
+// dials an executor before entry.mu is ever taken (it doesn't need the
+// entry until this point), so it must go through this locked setter rather
+// than writing entry.exec directly — otherwise it races every other path
+// (getExecutorLocked, registry.remove) that touches the same field under
+// the lock. If a concurrent getExecutorLocked call for the same id already
+// cached one first, the redundant dial is closed and the existing one wins.
+func (e *targetEntry) setExec(ex executor.Executor) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.exec != nil {
+		ex.Close()
+		return
+	}
+	e.exec = ex
+}
+
 // setupRun tracks one setup.RunAll invocation for a target: every event it
 // has emitted so far (so a new SSE subscriber can replay history) plus the
 // live subscriber set.
@@ -106,10 +140,44 @@ type setupRun struct {
 	subs    map[chan setup.Event]struct{}
 	running bool
 	err     error
+
+	// cancel and done let registry.remove interrupt an in-flight run and
+	// wait (bounded) for its goroutine to actually stop touching the
+	// target's executor before Close()ing it — see cancelAndWait. done is
+	// closed by the setup goroutine once setup.RunAll has returned.
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
-func newSetupRun() *setupRun {
-	return &setupRun{subs: map[chan setup.Event]struct{}{}, running: true}
+func newSetupRun(cancel context.CancelFunc) *setupRun {
+	return &setupRun{
+		subs:    map[chan setup.Event]struct{}{},
+		running: true,
+		cancel:  cancel,
+		done:    make(chan struct{}),
+	}
+}
+
+// cancelAndWait cancels the run's context, then blocks for up to timeout
+// waiting for the run's goroutine to finish (signaled by done being
+// closed) — so a caller about to Close the run's executor can be sure it's
+// no longer in use, without risking an unbounded wait if the run's step
+// ignores cancellation somehow.
+func (sr *setupRun) cancelAndWait(timeout time.Duration) {
+	sr.mu.Lock()
+	cancel := sr.cancel
+	done := sr.done
+	sr.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
 }
 
 func (sr *setupRun) append(ev setup.Event) {
@@ -475,7 +543,7 @@ func (s *Server) handleAddTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.reg.get(t.ID).exec = ex
+	s.reg.get(t.ID).setExec(ex)
 
 	added, _ := findTarget(cfg, t.ID)
 	writeJSON(w, http.StatusCreated, added)
@@ -559,7 +627,8 @@ func (s *Server) handleStartSetup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "setup is already running for this target")
 		return
 	}
-	run := newSetupRun()
+	setupCtx, setupCancel := context.WithCancel(context.Background())
+	run := newSetupRun(setupCancel)
 	entry.setup = run
 	entry.mu.Unlock()
 
@@ -583,6 +652,7 @@ func (s *Server) handleStartSetup(w http.ResponseWriter, r *http.Request) {
 		entry.mu.Lock()
 		entry.setup = nil
 		entry.mu.Unlock()
+		setupCancel()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -595,8 +665,12 @@ func (s *Server) handleStartSetup(w http.ResponseWriter, r *http.Request) {
 	}()
 	go func() {
 		defer close(events)
-		runErr := setup.RunAll(context.Background(), ex, steps, &setup.State{Wire: wire, Events: events})
+		runErr := setup.RunAll(setupCtx, ex, steps, &setup.State{Wire: wire, Events: events})
 		run.finish(runErr)
+		// Signal that this goroutine is done touching ex — registry.remove
+		// waits on this before Close()ing the executor out from under a
+		// still-running setup step.
+		close(run.done)
 	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "started"})
@@ -822,13 +896,13 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if cfg.AIProvider == "" {
-		writeError(w, http.StatusConflict, "no AI provider is configured; set one in Settings first")
-		return
-	}
 	target, ok := findTarget(cfg, id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "target not found")
+		return
+	}
+	if cfg.AIProvider == "" {
+		writeError(w, http.StatusConflict, "no AI provider is configured; set one in Settings first")
 		return
 	}
 
