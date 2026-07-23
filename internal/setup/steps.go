@@ -80,7 +80,15 @@ func preflightStep() Step {
 }
 
 func preflightCheck(ctx context.Context, e executor.Executor, w catalog.WireConfig) error {
-	res, err := e.Run(ctx, "uname", nil)
+	res, err := e.Run(ctx, "id -u", nil)
+	if err != nil {
+		return fmt.Errorf("preflight: id -u: %w", err)
+	}
+	if uid := strings.TrimSpace(res.Stdout); uid != "0" {
+		return fmt.Errorf("preflight: setup requires root on the target (SSH as root, or run valve-node as root in local mode); id -u reported %q", uid)
+	}
+
+	res, err = e.Run(ctx, "uname", nil)
 	if err != nil {
 		return fmt.Errorf("preflight: uname: %w", err)
 	}
@@ -327,6 +335,21 @@ func wireStep() Step {
 			if err != nil {
 				return fmt.Errorf("wire: render units: %w", err)
 			}
+
+			// Detect a genuine content change (e.g. the user switched
+			// chain/clients since the last setup run) versus a fresh
+			// install: only the former needs an explicit restart below,
+			// since `enable --now` already starts a freshly-written unit
+			// on its own. A missing file (ReadFile error) is a fresh
+			// install, not a change.
+			changed := false
+			if old, err := e.ReadFile(ctx, execUnitPath); err == nil && string(old) != execUnit {
+				changed = true
+			}
+			if old, err := e.ReadFile(ctx, beaconUnitPath); err == nil && string(old) != beaconUnit {
+				changed = true
+			}
+
 			if err := e.WriteFile(ctx, execUnitPath, []byte(execUnit), 0644); err != nil {
 				return fmt.Errorf("wire: write %s: %w", execUnitPath, err)
 			}
@@ -344,6 +367,21 @@ func wireStep() Step {
 			}
 			if res.ExitCode != 0 {
 				return fmt.Errorf("wire: systemctl daemon-reload/enable failed (exit %d): %s", res.ExitCode, res.Stderr)
+			}
+
+			if changed {
+				// A content change (not just "not yet enabled") requires
+				// an explicit restart — `enable --now` on an already-
+				// running unit with a rewritten ExecStart does not by
+				// itself relaunch the process with the new config.
+				restartCmd := fmt.Sprintf("systemctl restart %s %s", execUnitName, beaconUnitName)
+				res, err := e.Run(ctx, restartCmd, opts)
+				if err != nil {
+					return fmt.Errorf("wire: systemctl restart: %w", err)
+				}
+				if res.ExitCode != 0 {
+					return fmt.Errorf("wire: systemctl restart failed (exit %d): %s", res.ExitCode, res.Stderr)
+				}
 			}
 			return nil
 		},
@@ -367,6 +405,32 @@ func wireStep() Step {
 			}
 			if res.ExitCode != 0 {
 				return fmt.Errorf("wire: units not enabled yet: %s", strings.TrimSpace(res.Stdout))
+			}
+
+			// Existence + enabled isn't enough: the units on the target
+			// could be stale leftovers from a previous setup run with a
+			// different WireConfig (different chain/clients). Byte-compare
+			// against what catalog.RenderUnits produces for the CURRENT
+			// config so a config change is detected as "not verified" and
+			// drives Run to rewrite + restart, instead of silently
+			// reporting setup complete while the old units keep running.
+			wantExec, wantBeacon, err := catalog.RenderUnits(w)
+			if err != nil {
+				return fmt.Errorf("wire: verify render: %w", err)
+			}
+			gotExec, err := e.ReadFile(ctx, execUnitPath)
+			if err != nil {
+				return fmt.Errorf("wire: verify read %s: %w", execUnitPath, err)
+			}
+			if string(gotExec) != wantExec {
+				return fmt.Errorf("wire: %s content does not match the desired config (chain/client selection changed since it was written)", execUnitPath)
+			}
+			gotBeacon, err := e.ReadFile(ctx, beaconUnitPath)
+			if err != nil {
+				return fmt.Errorf("wire: verify read %s: %w", beaconUnitPath, err)
+			}
+			if string(gotBeacon) != wantBeacon {
+				return fmt.Errorf("wire: %s content does not match the desired config (chain/client selection changed since it was written)", beaconUnitPath)
 			}
 			return nil
 		},

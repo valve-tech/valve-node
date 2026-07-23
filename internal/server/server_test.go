@@ -52,6 +52,50 @@ func TestTokenQueryParamSetsCookieAndServesUI(t *testing.T) {
 	}
 }
 
+// TestWrongTokenRejected_HeaderAndCookie locks in that the constant-time
+// token comparison (crypto/subtle.ConstantTimeCompare) still enforces exact
+// equality on both the Authorization header and cookie auth paths — wrong
+// tokens (including different-length ones, which ConstantTimeCompare
+// short-circuits on) must be rejected exactly as with the old `==` compare.
+func TestWrongTokenRejected_HeaderAndCookie(t *testing.T) {
+	ts, token := testServer(t)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/health", nil)
+	req.Header.Set("Authorization", "Bearer wrong-token-wrong-token-wrong")
+	res, _ := http.DefaultClient.Do(req)
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong bearer token: got %d, want 401", res.StatusCode)
+	}
+
+	req, _ = http.NewRequest("GET", ts.URL+"/api/health", nil)
+	req.Header.Set("Authorization", "Bearer short")
+	res, _ = http.DefaultClient.Do(req)
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("shorter-than-token bearer token: got %d, want 401", res.StatusCode)
+	}
+
+	req, _ = http.NewRequest("GET", ts.URL+"/api/health", nil)
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: "wrong-cookie-wrong-cookie-value"})
+	res, _ = http.DefaultClient.Do(req)
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong cookie token: got %d, want 401", res.StatusCode)
+	}
+
+	// Sanity: the real token still works on both paths.
+	req, _ = http.NewRequest("GET", ts.URL+"/api/health", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	res, _ = http.DefaultClient.Do(req)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("correct bearer token: got %d, want 200", res.StatusCode)
+	}
+	req, _ = http.NewRequest("GET", ts.URL+"/api/health", nil)
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: token})
+	res, _ = http.DefaultClient.Do(req)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("correct cookie token: got %d, want 200", res.StatusCode)
+	}
+}
+
 func TestNewSessionTokenIsRandomHex(t *testing.T) {
 	a, b := NewSessionToken(), NewSessionToken()
 	if len(a) != 32 || a == b {

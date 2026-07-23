@@ -22,8 +22,40 @@ func testWire() catalog.WireConfig {
 
 // ---- preflight ----
 
-func TestPreflight_FailsOnNonLinux(t *testing.T) {
+// rootUIDScript is the `id -u` result common to every preflight test that
+// isn't itself exercising the root check: uid 0, as if SSH'd in as root (or
+// running valve-node as root in local mode).
+func rootUIDScript(e *fakeExecutor) *fakeExecutor {
+	return e.script("id -u", executor.Result{Stdout: "0\n", ExitCode: 0})
+}
+
+func TestPreflight_FailsWhenNotRoot(t *testing.T) {
 	e := newFakeExecutor().
+		script("id -u", executor.Result{Stdout: "1000\n", ExitCode: 0})
+	step := preflightStep()
+	err := step.Verify(context.Background(), e, &State{Wire: testWire()})
+	if err == nil {
+		t.Fatal("want error when the target's id -u is non-zero, got nil")
+	}
+	want := "setup requires root on the target (SSH as root, or run valve-node as root in local mode)"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q does not contain %q", err, want)
+	}
+}
+
+func TestPreflight_PassesRootCheckWhenUIDZero(t *testing.T) {
+	e := rootUIDScript(newFakeExecutor()).
+		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
+		script("df -B1 --output=avail", executor.Result{Stdout: "Avail\n9999999999999\n", ExitCode: 0}).
+		script("ss -ltn", executor.Result{Stdout: "State  Recv-Q Send-Q Local Address:Port\n", ExitCode: 0})
+	step := preflightStep()
+	if err := step.Verify(context.Background(), e, &State{Wire: testWire()}); err != nil {
+		t.Fatalf("want no error when id -u reports 0, got %v", err)
+	}
+}
+
+func TestPreflight_FailsOnNonLinux(t *testing.T) {
+	e := rootUIDScript(newFakeExecutor()).
 		script("uname", executor.Result{Stdout: "Darwin\n", ExitCode: 0})
 	step := preflightStep()
 	err := step.Verify(context.Background(), e, &State{Wire: testWire()})
@@ -36,7 +68,7 @@ func TestPreflight_FailsOnNonLinux(t *testing.T) {
 }
 
 func TestPreflight_FailsOnInsufficientDisk(t *testing.T) {
-	e := newFakeExecutor().
+	e := rootUIDScript(newFakeExecutor()).
 		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
 		script("df -B1 --output=avail", executor.Result{Stdout: "Avail\n1000\n", ExitCode: 0}).
 		script("ss -ltn", executor.Result{Stdout: "State  Recv-Q Send-Q Local Address:Port\n", ExitCode: 0})
@@ -48,7 +80,7 @@ func TestPreflight_FailsOnInsufficientDisk(t *testing.T) {
 }
 
 func TestPreflight_FailsOnBusyPort(t *testing.T) {
-	e := newFakeExecutor().
+	e := rootUIDScript(newFakeExecutor()).
 		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
 		script("df -B1 --output=avail", executor.Result{Stdout: "Avail\n9999999999999\n", ExitCode: 0}).
 		script("ss -ltn", executor.Result{
@@ -74,7 +106,7 @@ func TestPreflight_FailsOnBusyPort(t *testing.T) {
 func TestPreflight_ProbesNearestExistingAncestorOnFreshDataDir(t *testing.T) {
 	w := testWire()
 	w.DataDir = "/var/lib/valve-node/369"
-	e := newFakeExecutor().
+	e := rootUIDScript(newFakeExecutor()).
 		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
 		// The OLD code's exact command shape — must NOT be what's called.
 		script("df -B1 --output=avail '/var/lib/valve-node/369'", executor.Result{ExitCode: 1, Stderr: "df: cannot access '/var/lib/valve-node/369': No such file or directory"}).
@@ -94,7 +126,7 @@ func TestPreflight_ProbesNearestExistingAncestorOnFreshDataDir(t *testing.T) {
 func TestPreflight_DFAncestorWalkNonZeroExitProducesClearError(t *testing.T) {
 	w := testWire()
 	w.DataDir = "/var/lib/valve-node/369"
-	e := newFakeExecutor().
+	e := rootUIDScript(newFakeExecutor()).
 		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
 		script("while [ ! -d", executor.Result{ExitCode: 1, Stderr: "df: boom"})
 	step := preflightStep()
@@ -113,7 +145,7 @@ func TestPreflight_DFAncestorWalkNonZeroExitProducesClearError(t *testing.T) {
 // units' own listeners show up in `ss -ltn`. With both units active and ALL
 // THREE ports (8545/8551/5052) showing as listening, preflight must pass.
 func TestPreflight_ExemptsPortsHeldByOwnActiveUnits(t *testing.T) {
-	e := newFakeExecutor().
+	e := rootUIDScript(newFakeExecutor()).
 		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
 		script("df -B1 --output=avail", executor.Result{Stdout: "Avail\n9999999999999\n", ExitCode: 0}).
 		script("systemctl is-active valve-node-exec.service valve-node-beacon.service", executor.Result{
@@ -136,7 +168,7 @@ func TestPreflight_ExemptsPortsHeldByOwnActiveUnits(t *testing.T) {
 // behavior: when valve-node's own units are NOT active, a busy port must
 // still fail preflight with the same clear error as before.
 func TestPreflight_StillFailsOnBusyPortWhenUnitsInactive(t *testing.T) {
-	e := newFakeExecutor().
+	e := rootUIDScript(newFakeExecutor()).
 		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
 		script("df -B1 --output=avail", executor.Result{Stdout: "Avail\n9999999999999\n", ExitCode: 0}).
 		script("systemctl is-active valve-node-exec.service valve-node-beacon.service", executor.Result{
@@ -161,7 +193,7 @@ func TestPreflight_StillFailsOnBusyPortWhenUnitsInactive(t *testing.T) {
 // the beacon's 5052 — that port must still fail when the beacon unit is
 // inactive and something else is listening on it.
 func TestPreflight_ExecActiveDoesNotExemptBeaconPort(t *testing.T) {
-	e := newFakeExecutor().
+	e := rootUIDScript(newFakeExecutor()).
 		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
 		script("df -B1 --output=avail", executor.Result{Stdout: "Avail\n9999999999999\n", ExitCode: 0}).
 		script("systemctl is-active valve-node-exec.service valve-node-beacon.service", executor.Result{
@@ -185,7 +217,7 @@ func TestPreflight_ExecActiveDoesNotExemptBeaconPort(t *testing.T) {
 }
 
 func TestPreflight_PassesWhenAllOK(t *testing.T) {
-	e := newFakeExecutor().
+	e := rootUIDScript(newFakeExecutor()).
 		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
 		script("df -B1 --output=avail", executor.Result{Stdout: "Avail\n9999999999999\n", ExitCode: 0}).
 		script("ss -ltn", executor.Result{Stdout: "State  Recv-Q Send-Q Local Address:Port\n", ExitCode: 0})
@@ -420,6 +452,88 @@ func TestWire_EnablesBothUnits(t *testing.T) {
 	}
 	if !enabled {
 		t.Fatalf("systemctl enable --now was not run for both units; calls = %v", e.callLog())
+	}
+}
+
+// TestWire_VerifyFailsOnContentMismatchAndRunRewritesAndRestarts locks in
+// the content-reconcile fix: Verify must not stop at "files exist and units
+// enabled" — it has to byte-compare the on-target unit files against what
+// catalog.RenderUnits produces for the current WireConfig. If the user
+// switched chain/clients, the old units are stale (present + enabled, but
+// wrong), so Verify must fail, Run must rewrite both unit files, and
+// because the rewrite changed real content it must restart both units (a
+// content change a plain `enable --now` won't pick up on its own).
+func TestWire_VerifyFailsOnContentMismatchAndRunRewritesAndRestarts(t *testing.T) {
+	w := testWire()
+	wantExec, wantBeacon, err := catalog.RenderUnits(w)
+	if err != nil {
+		t.Fatalf("RenderUnits: %v", err)
+	}
+
+	e := newFakeExecutor().
+		script("test -f", executor.Result{ExitCode: 0}). // jwt + both unit files present
+		script("systemctl is-enabled", executor.Result{Stdout: "enabled\nenabled\n", ExitCode: 0}).
+		script("systemctl daemon-reload", executor.Result{ExitCode: 0}).
+		script("systemctl restart", executor.Result{ExitCode: 0})
+	// Stale on-target content from a previous setup run with a different
+	// WireConfig (e.g. different chain/client selection).
+	e.files[execUnitPath] = []byte("stale exec unit content")
+	e.files[beaconUnitPath] = []byte("stale beacon unit content")
+
+	step := wireStep()
+	st := &State{Wire: w, Events: make(chan Event, 100)}
+
+	if err := step.Verify(context.Background(), e, st); err == nil {
+		t.Fatal("Verify should fail when on-target unit content differs from the desired render, got nil")
+	}
+
+	if err := step.Run(context.Background(), e, st); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := string(e.files[execUnitPath]); got != wantExec {
+		t.Errorf("exec unit not rewritten to desired content; got %q, want %q", got, wantExec)
+	}
+	if got := string(e.files[beaconUnitPath]); got != wantBeacon {
+		t.Errorf("beacon unit not rewritten to desired content; got %q, want %q", got, wantBeacon)
+	}
+
+	restarted := false
+	for _, c := range e.callLog() {
+		if strings.Contains(c, "systemctl restart") && strings.Contains(c, execUnitName) && strings.Contains(c, beaconUnitName) {
+			restarted = true
+		}
+	}
+	if !restarted {
+		t.Fatalf("Run did not restart both units after a content-changing rewrite; calls = %v", e.callLog())
+	}
+
+	if err := step.Verify(context.Background(), e, st); err != nil {
+		t.Fatalf("Verify after rewrite should now pass, got %v", err)
+	}
+}
+
+// TestWire_VerifyPassesWhenContentMatchesDesiredRender locks in the
+// unchanged-content path: when the on-target unit files already byte-match
+// catalog.RenderUnits' current output, Verify passes as today (no
+// unnecessary Run/restart on a re-run with the same config).
+func TestWire_VerifyPassesWhenContentMatchesDesiredRender(t *testing.T) {
+	w := testWire()
+	wantExec, wantBeacon, err := catalog.RenderUnits(w)
+	if err != nil {
+		t.Fatalf("RenderUnits: %v", err)
+	}
+
+	e := newFakeExecutor().
+		script("test -f", executor.Result{ExitCode: 0}).
+		script("systemctl is-enabled", executor.Result{Stdout: "enabled\nenabled\n", ExitCode: 0})
+	e.files[execUnitPath] = []byte(wantExec)
+	e.files[beaconUnitPath] = []byte(wantBeacon)
+
+	step := wireStep()
+	st := &State{Wire: w, Events: make(chan Event, 100)}
+	if err := step.Verify(context.Background(), e, st); err != nil {
+		t.Fatalf("Verify should pass when on-target content matches the desired render, got %v", err)
 	}
 }
 

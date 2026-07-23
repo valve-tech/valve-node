@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"io/fs"
@@ -117,19 +118,29 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		if authHeader := r.Header.Get("Authorization"); authHeader != "" {
-			if tok, ok := strings.CutPrefix(authHeader, "Bearer "); ok && tok == s.cfg.Token {
+			if tok, ok := strings.CutPrefix(authHeader, "Bearer "); ok && tokensEqual(tok, s.cfg.Token) {
 				next.ServeHTTP(w, r)
 				return
 			}
 		}
 
-		if c, err := r.Cookie(cookieName); err == nil && c.Value == s.cfg.Token {
+		if c, err := r.Cookie(cookieName); err == nil && tokensEqual(c.Value, s.cfg.Token) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	})
+}
+
+// tokensEqual compares a caller-supplied token against the server's real
+// session token in constant time (crypto/subtle.ConstantTimeCompare), so a
+// wrong guess can't be distinguished by response-time from how many leading
+// bytes happened to match — an ordinary `==` string compare short-circuits
+// on the first mismatched byte and leaks that timing signal. Used for both
+// the Authorization header and cookie auth paths.
+func tokensEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // ListenAndServe runs the server until ctx is canceled.

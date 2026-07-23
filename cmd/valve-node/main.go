@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/valve-tech/valve-node/internal/config"
@@ -23,10 +25,19 @@ import (
 //go:embed all:web/dist
 var embeddedUI embed.FS
 
+// bindFlagUsage is --bind's help text. Called out here (rather than inline
+// in flag.String) so it's independently testable.
+const bindFlagUsage = "address to bind the local server to. " +
+	"WARNING: binding beyond 127.0.0.1 exposes full control of your servers over plain HTTP"
+
 func main() {
-	bind := flag.String("bind", "127.0.0.1:8799", "address to bind the local server to")
+	bind := flag.String("bind", "127.0.0.1:8799", bindFlagUsage)
 	noOpen := flag.Bool("no-open", false, "do not open a browser window automatically")
 	flag.Parse()
+
+	if warning := bindWarningLine(*bind); warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
 
 	// Load (or lazily create on first Save) valve-node's local state —
 	// known targets, AI provider settings — from ~/.valve-node/config.json.
@@ -62,6 +73,31 @@ func main() {
 	if err := s.ListenAndServe(ctx); err != nil {
 		log.Fatalf("valve-node: server: %v", err)
 	}
+}
+
+// bindWarningLine returns a loud warning line when bind's host is not
+// loopback (127.0.0.1 or localhost — the server's safe default), or "" if
+// it is. valve-node's local server is token-gated but plain HTTP: binding
+// it beyond loopback puts full control of every configured target (setup,
+// shell-equivalent install/build commands, log access) on the network
+// reachable at that address, over an unencrypted channel a network
+// observer can read the session token off of.
+func bindWarningLine(bind string) string {
+	host, _, err := net.SplitHostPort(bind)
+	if err != nil {
+		// No port (or an unparsable address) — treat the whole string as
+		// the host, e.g. a bare "127.0.0.1" or "0.0.0.0".
+		host = bind
+	}
+	if host == "127.0.0.1" || strings.EqualFold(host, "localhost") {
+		return ""
+	}
+	return fmt.Sprintf(
+		"WARNING: binding to %s exposes full control of your servers over plain HTTP — "+
+			"anyone who can reach %s can drive setup, run install/build commands, and read logs. "+
+			"Only bind beyond 127.0.0.1 on a trusted network (e.g. behind an SSH tunnel), never on the open internet.",
+		bind, bind,
+	)
 }
 
 // openBrowser opens url in the user's default browser. Best-effort: errors

@@ -169,6 +169,32 @@ func TestClassify(t *testing.T) {
 			line:    "Jul 23 06:00:00 ERRO Head is stuck, prune check failed",
 			wantHit: true, wantSig: "", wantSev: "error",
 		},
+		// engine-auth must not fire on benign lines that merely mention
+		// jwt/401/unauthorized without an error-level indicator — same
+		// lesson as setup's handshake authErrorLines gate (steps.go),
+		// propagated here.
+		{
+			name:    "benign prysm JWT read line, no engine-auth false positive",
+			line:    `level=info msg="Finished reading JWT secret from /x/jwt.hex"`,
+			wantHit: false,
+		},
+		{
+			name:    "engine auth with explicit error level still fires",
+			line:    `level=error msg="401 Unauthorized invalid JWT"`,
+			wantHit: true, wantSig: "engine-auth", wantSev: "critical", wantExpl: true,
+		},
+		// low-peer-count's "0 peers" match must be word-bounded so it
+		// doesn't substring-match "10 peers"/"20 peers".
+		{
+			name:    "ten peers is not zero peers",
+			line:    "INFO Connected to 10 peers",
+			wantHit: false,
+		},
+		{
+			name:    "zero peers alone is low-peer-count",
+			line:    "WARN 0 peers",
+			wantHit: true, wantSig: "low-peer-count", wantSev: "warn", wantExpl: true,
+		},
 	}
 
 	for _, tc := range cases {

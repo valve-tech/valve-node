@@ -194,6 +194,9 @@ func (w *Watcher) publish(hit Hit) {
 func classify(unit, line string, now time.Time) (Hit, bool) {
 	for _, sig := range signatures {
 		if sig.pattern.MatchString(line) {
+			if sig.requireErrLevel && !errLevelPattern.MatchString(line) {
+				continue
+			}
 			return Hit{
 				Unit:      unit,
 				Line:      line,

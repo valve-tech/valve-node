@@ -17,6 +17,17 @@ Supported networks:
 - **PulseChain**
 - **PulseChain v4** (testnet)
 
+## Requirements
+
+- The **target** being set up (the box that will run the execution + beacon
+  clients) must be **Debian or Ubuntu Linux**.
+- The **SSH user must be root** — setup writes systemd units under
+  `/etc/systemd/system`, manages services via `systemctl`, and installs
+  binaries to `/usr/local/bin`. In **local mode** (setting up the same
+  machine valve-node itself is running on), run valve-node as root. Preflight
+  checks this (`id -u`) and fails fast with a clear message if it isn't met.
+- Node services (the execution and beacon clients) run **as root** in v0.1.
+
 ## Quickstart
 
 ### Download a release
@@ -62,6 +73,14 @@ The local server binds to `127.0.0.1` by default and requires a session
 token for every request (via `Authorization: Bearer`, a cookie set from the
 initial `?token=` link, or the query parameter itself), so nothing on your
 machine can drive it without that token.
+
+valve-node itself always runs locally — the UI and API bind to your own
+machine. What it sets up can be **local** (the same machine) or **remote
+over SSH**: point a target at a `host:port` + root SSH credentials and
+valve-node drives the whole install/wire/start/handshake flow on that box
+instead, so you can run valve-node on a laptop while it provisions a
+dedicated server. Both modes need root on the target (see Requirements
+above).
 
 ## Contributing
 

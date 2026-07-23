@@ -12,7 +12,21 @@ type signature struct {
 	severity string
 	explain  string
 	learnURL string
+	// requireErrLevel, when true, means pattern alone is not enough — the
+	// line must ALSO carry an error-level indicator (see errLevelPattern)
+	// before it counts as a match. Used by engine-auth: benign lines like
+	// prysm's routine "Finished reading JWT secret from ...jwt.hex" INFO
+	// line match `jwt|401|unauthorized` too, so without this gate they'd
+	// be misclassified as a critical auth failure. Same lesson as
+	// internal/setup/steps.go's handshake authErrorLines gate, propagated
+	// here since the underlying patterns can each drift independently.
+	requireErrLevel bool
 }
+
+// errLevelPattern mirrors internal/setup/steps.go's errLevelPattern (kept
+// as a separate copy since the two packages classify independent log
+// streams and shouldn't share a cross-package dependency for one regex).
+var errLevelPattern = regexp.MustCompile(`(?i)(level=(warn(ing)?|error|fatal)|\bERRO\b|\bCRIT\b|\bFATAL\b|authentication failed|invalid)`)
 
 const learnRPCBase = "https://learn.valve.city/rpc"
 
@@ -28,11 +42,12 @@ var signatures = []signature{
 		learnURL: learnRPCBase + "#syncing",
 	},
 	{
-		name:     "engine-auth",
-		pattern:  regexp.MustCompile(`(?i)jwt|401|unauthorized`),
-		severity: "critical",
-		explain:  "The execution and beacon clients can't authenticate to each other over the engine API. This is almost always a mismatched or missing JWT secret file — check both clients point at the same jwt.hex.",
-		learnURL: learnRPCBase + "#jwt-secret",
+		name:            "engine-auth",
+		pattern:         regexp.MustCompile(`(?i)jwt|401|unauthorized`),
+		severity:        "critical",
+		explain:         "The execution and beacon clients can't authenticate to each other over the engine API. This is almost always a mismatched or missing JWT secret file — check both clients point at the same jwt.hex.",
+		learnURL:        learnRPCBase + "#jwt-secret",
+		requireErrLevel: true,
 	},
 	{
 		name:     "checkpoint-sync-failed",
@@ -43,7 +58,7 @@ var signatures = []signature{
 	},
 	{
 		name:     "low-peer-count",
-		pattern:  regexp.MustCompile(`(?i)low peer count|0 peers`),
+		pattern:  regexp.MustCompile(`(?i)low peer count|\b0 peers\b`),
 		severity: "warn",
 		explain:  "The client has too few (or zero) peers to sync or serve requests reliably. Check outbound P2P ports are open and reachable from the internet.",
 		learnURL: learnRPCBase + "#ports",
