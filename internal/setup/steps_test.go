@@ -945,3 +945,37 @@ func TestWire_VerifyFailsWhenDataDirNotOwnedByServiceUser(t *testing.T) {
 		t.Fatalf("want Verify to pass once the data dir is owned by %s, got %v", catalog.ServiceUser, err)
 	}
 }
+
+// TestWire_RunStopsServicesBeforeChown locks in the migration-race fix: on
+// a re-run against a live root-era install, the old (still-root) services
+// must be stopped BEFORE the recursive chown, or they keep creating new
+// root-owned files behind the chown's walk — files the de-rooted service
+// then can't open after the restart.
+func TestWire_RunStopsServicesBeforeChown(t *testing.T) {
+	e := newFakeExecutor()
+	step := wireStep()
+	if err := step.Run(context.Background(), e, &State{Wire: testWire()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	stopIdx, chownIdx, startIdx := -1, -1, -1
+	for i, c := range e.callLog() {
+		if strings.Contains(c, "systemctl stop") {
+			stopIdx = i
+		}
+		if strings.Contains(c, "chown -R") && chownIdx == -1 {
+			chownIdx = i
+		}
+		if strings.Contains(c, "systemctl enable --now") {
+			startIdx = i
+		}
+	}
+	if stopIdx == -1 {
+		t.Fatalf("no systemctl stop before the chown; calls: %v", e.callLog())
+	}
+	if chownIdx == -1 || startIdx == -1 {
+		t.Fatalf("missing chown or enable --now; calls: %v", e.callLog())
+	}
+	if !(stopIdx < chownIdx && chownIdx < startIdx) {
+		t.Fatalf("want stop(%d) < chown(%d) < enable --now(%d); calls: %v", stopIdx, chownIdx, startIdx, e.callLog())
+	}
+}

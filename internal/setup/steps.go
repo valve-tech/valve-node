@@ -364,6 +364,21 @@ func wireStep() Step {
 				}
 			}
 
+			// Stop any live services before re-owning the tree. On the
+			// migration path (a root-era install being re-run) the old
+			// root process would otherwise keep creating files BEHIND the
+			// recursive chown's walk — files that stay root-owned and
+			// break the de-rooted service after restart. Run only executes
+			// when Verify failed (fresh install, config change, or
+			// ownership mismatch), and every one of those paths
+			// starts/restarts the units below anyway, so this stop adds no
+			// downtime that wasn't already coming. Exit code deliberately
+			// unchecked: on a fresh box the units don't exist yet.
+			stopCmd := fmt.Sprintf("systemctl stop %s %s 2>/dev/null || true", execUnitName, beaconUnitName)
+			if _, err := e.Run(ctx, stopCmd, opts); err != nil {
+				return fmt.Errorf("wire: stop services before chown: %w", err)
+			}
+
 			// Re-own the whole data tree to the service user on every run.
 			// This covers three cases with one command: the JWT just
 			// written above as root, a fresh DataDir, and — the migration
