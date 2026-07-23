@@ -63,6 +63,21 @@ token for every request (via `Authorization: Bearer`, a cookie set from the
 initial `?token=` link, or the query parameter itself), so nothing on your
 machine can drive it without that token.
 
+## Contributing
+
+The web UI (`cmd/valve-node/web/`) has no end-to-end (Playwright) test suite
+by design for v1 — the API layer it talks to (`internal/server`) is fully
+covered by Go tests, and the UI itself is a thin, framework-free render
+layer over that API. Verify UI changes with:
+
+```bash
+cd cmd/valve-node/web && npm run build   # tsc --noEmit (strict) + vite build
+go build ./...                            # confirms the rebuilt dist/ still embeds
+```
+
+then a manual smoke test: run `./valve-node --no-open` against a scratch
+`$HOME` and curl the printed token URL.
+
 ## Learn more
 
 For a deeper guide to running your own RPC node, see
