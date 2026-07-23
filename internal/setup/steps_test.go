@@ -223,17 +223,22 @@ func TestInstall_MarkerSkipsAlreadyInstalled(t *testing.T) {
 	}
 }
 
-func TestInstall_UsesMappedBinaryNameForGoPulse(t *testing.T) {
+// TestInstall_ProbesBinaryAtClientIDPath locks in the task-4b fix: every
+// client's BuildCmd installs to /usr/local/bin/<client-id> (go-pulse's
+// recipe builds `go build -o /usr/local/bin/go-pulse ./cmd/geth`, not a
+// binary named `geth`), so the install marker must probe that same path —
+// not an aliased upstream binary name.
+func TestInstall_ProbesBinaryAtClientIDPath(t *testing.T) {
 	client, ok := catalog.ClientByID("go-pulse")
 	if !ok {
 		t.Fatal("catalog missing go-pulse")
 	}
 	e := newFakeExecutor().
-		script("test -x '/usr/local/bin/geth'", executor.Result{ExitCode: 0, Stdout: "geth 1.0\n"})
+		script("test -x '/usr/local/bin/go-pulse'", executor.Result{ExitCode: 0, Stdout: "go-pulse 1.0\n"})
 	step := installStep("install-exec", "Install execution client", client)
 	err := step.Verify(context.Background(), e, &State{Wire: testWire(), Events: make(chan Event, 10)})
 	if err != nil {
-		t.Fatalf("go-pulse install marker should probe /usr/local/bin/geth: %v", err)
+		t.Fatalf("go-pulse install marker should probe /usr/local/bin/go-pulse: %v", err)
 	}
 }
 
@@ -480,7 +485,7 @@ func TestPlan_ReturnsOrderedSteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	want := []string{"preflight", "install-exec", "install-beacon", "wire", "start", "handshake"}
+	want := []string{"preflight", "toolchain", "install-exec", "install-beacon", "wire", "start", "handshake"}
 	if len(steps) != len(want) {
 		t.Fatalf("got %d steps, want %d", len(steps), len(want))
 	}

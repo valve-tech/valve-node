@@ -31,8 +31,8 @@ const (
 	beaconUnitPath = "/etc/systemd/system/" + beaconUnitName
 )
 
-// Plan returns the ordered steps for the config: preflight, install-exec,
-// install-beacon, wire, start, handshake.
+// Plan returns the ordered steps for the config: preflight, toolchain,
+// install-exec, install-beacon, wire, start, handshake.
 func Plan(w catalog.WireConfig) ([]Step, error) {
 	execClient, ok := catalog.ClientByID(w.ExecID)
 	if !ok || execClient.Kind != "exec" {
@@ -52,6 +52,7 @@ func Plan(w catalog.WireConfig) ([]Step, error) {
 
 	return []Step{
 		preflightStep(),
+		toolchainStep(neededToolchains(execClient, beaconClient)),
 		installStep("install-exec", "Install execution client ("+w.ExecID+")", execClient),
 		installStep("install-beacon", "Install beacon client ("+w.BeaconID+")", beaconClient),
 		wireStep(),
@@ -193,27 +194,13 @@ func humanBytes(b uint64) string {
 // install
 // ---------------------------------------------------------------------
 
-// binaryNameByClientID maps a catalog client id to the actual binary name
-// invoked in its systemd ExecStart line (internal/catalog/units.go's
-// execCommand/beaconCommand): most clients invoke a binary named after
-// themselves, but go-pulse (Geth-derived) runs as `geth` and prysm-pulse
-// runs as `beacon-chain`. Install must place the binary under this name,
-// not the (possibly different) catalog client id, or the rendered unit's
-// bare ExecStart command won't resolve.
-var binaryNameByClientID = map[string]string{
-	"reth":             "reth",
-	"geth":             "geth",
-	"go-pulse":         "geth",
-	"erigon-pulse":     "erigon",
-	"lighthouse-pulse": "lighthouse",
-	"lighthouse":       "lighthouse",
-	"prysm-pulse":      "beacon-chain",
-}
-
+// binaryNameFor returns the binary name a catalog client installs as. Every
+// client's BuildCmd (internal/catalog/clients.go) installs to
+// /usr/local/bin/<client-id>, and internal/catalog/units.go's
+// execCommand/beaconCommand invoke each client by that same client-id name
+// in its systemd ExecStart line — so the install path is always just the
+// client id itself.
 func binaryNameFor(id string) string {
-	if n, ok := binaryNameByClientID[id]; ok {
-		return n
-	}
 	return id
 }
 
