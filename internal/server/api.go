@@ -578,6 +578,11 @@ func (s *Server) handleStartSetup(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	}); err != nil {
+		// Undo the "running" mark: the run never actually started, so a
+		// retry must not be told setup is already in progress.
+		entry.mu.Lock()
+		entry.setup = nil
+		entry.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
