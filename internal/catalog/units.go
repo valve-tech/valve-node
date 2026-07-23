@@ -177,8 +177,11 @@ func execCommand(w WireConfig) (string, error) {
 			"erigon --chain %s --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %s",
 			chain, w.DataDir, w.JWTPath, execHTTPPort,
 		)
-		if w.Archive {
-			cmd += " --gcmode archive"
+		// erigon defaults to archive mode; pruning is opt-in via --prune flags.
+		// erigon-2 full-node convention is --prune=hrtc. A wrong flag fails fast
+		// at unit start, surfaced by the setup handshake.
+		if !w.Archive {
+			cmd += " --prune=hrtc"
 		}
 		return cmd, nil
 

@@ -245,3 +245,35 @@ func TestRenderUnits_ArchiveFlagAffectsExecUnit(t *testing.T) {
 		t.Error("Archive=false and Archive=true produced identical exec units")
 	}
 }
+
+func TestRenderUnits_ErigonPulseArchiveFlags(t *testing.T) {
+	base := WireConfig{ChainID: 369, ExecID: "erigon-pulse", BeaconID: "lighthouse-pulse", DataDir: "/data", JWTPath: "/data/jwt.hex"}
+
+	// Test Archive=true: no --gcmode and no --prune (erigon defaults to archive)
+	archive := base
+	archive.Archive = true
+	archiveExec, _, err := RenderUnits(archive)
+	if err != nil {
+		t.Fatalf("RenderUnits(Archive=true) error: %v", err)
+	}
+	if strings.Contains(archiveExec, "--gcmode") {
+		t.Errorf("erigon-pulse Archive=true should not contain --gcmode:\n%s", archiveExec)
+	}
+	if strings.Contains(archiveExec, "--prune") {
+		t.Errorf("erigon-pulse Archive=true should not contain --prune:\n%s", archiveExec)
+	}
+
+	// Test Archive=false: should contain --prune=hrtc and not contain --gcmode
+	full := base
+	full.Archive = false
+	fullExec, _, err := RenderUnits(full)
+	if err != nil {
+		t.Fatalf("RenderUnits(Archive=false) error: %v", err)
+	}
+	if !strings.Contains(fullExec, "--prune=hrtc") {
+		t.Errorf("erigon-pulse Archive=false should contain --prune=hrtc:\n%s", fullExec)
+	}
+	if strings.Contains(fullExec, "--gcmode") {
+		t.Errorf("erigon-pulse Archive=false should not contain --gcmode:\n%s", fullExec)
+	}
+}
