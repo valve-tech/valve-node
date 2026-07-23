@@ -107,6 +107,83 @@ func TestPreflight_DFAncestorWalkNonZeroExitProducesClearError(t *testing.T) {
 	}
 }
 
+// TestPreflight_ExemptsPortsHeldByOwnActiveUnits locks in the E2E-discovered
+// idempotence defect: re-running setup against a box where valve-node's own
+// units are already active must not fail preflight just because those
+// units' own listeners show up in `ss -ltn`. With both units active and ALL
+// THREE ports (8545/8551/5052) showing as listening, preflight must pass.
+func TestPreflight_ExemptsPortsHeldByOwnActiveUnits(t *testing.T) {
+	e := newFakeExecutor().
+		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
+		script("df -B1 --output=avail", executor.Result{Stdout: "Avail\n9999999999999\n", ExitCode: 0}).
+		script("systemctl is-active valve-node-exec.service valve-node-beacon.service", executor.Result{
+			Stdout: "active\nactive\n", ExitCode: 0,
+		}).
+		script("ss -ltn", executor.Result{
+			Stdout: "State  Recv-Q Send-Q Local Address:Port\n" +
+				"LISTEN 0 128 127.0.0.1:8545 0.0.0.0:*\n" +
+				"LISTEN 0 128 127.0.0.1:8551 0.0.0.0:*\n" +
+				"LISTEN 0 128 127.0.0.1:5052 0.0.0.0:*\n",
+			ExitCode: 0,
+		})
+	step := preflightStep()
+	if err := step.Verify(context.Background(), e, &State{Wire: testWire()}); err != nil {
+		t.Fatalf("preflight should exempt ports held by valve-node's own active units, got %v", err)
+	}
+}
+
+// TestPreflight_StillFailsOnBusyPortWhenUnitsInactive locks in existing
+// behavior: when valve-node's own units are NOT active, a busy port must
+// still fail preflight with the same clear error as before.
+func TestPreflight_StillFailsOnBusyPortWhenUnitsInactive(t *testing.T) {
+	e := newFakeExecutor().
+		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
+		script("df -B1 --output=avail", executor.Result{Stdout: "Avail\n9999999999999\n", ExitCode: 0}).
+		script("systemctl is-active valve-node-exec.service valve-node-beacon.service", executor.Result{
+			Stdout: "inactive\ninactive\n", ExitCode: 3,
+		}).
+		script("ss -ltn", executor.Result{
+			Stdout:   "State  Recv-Q Send-Q Local Address:Port\nLISTEN 0 128 127.0.0.1:8545 0.0.0.0:*\n",
+			ExitCode: 0,
+		})
+	step := preflightStep()
+	err := step.Verify(context.Background(), e, &State{Wire: testWire()})
+	if err == nil {
+		t.Fatal("want error on busy port 8545 when units are inactive, got nil")
+	}
+	if !strings.Contains(err.Error(), "8545") {
+		t.Fatalf("error %q does not mention the busy port", err)
+	}
+}
+
+// TestPreflight_ExecActiveDoesNotExemptBeaconPort locks in that the
+// exemption is per-unit: an active exec unit exempts only 8545/8551, not
+// the beacon's 5052 — that port must still fail when the beacon unit is
+// inactive and something else is listening on it.
+func TestPreflight_ExecActiveDoesNotExemptBeaconPort(t *testing.T) {
+	e := newFakeExecutor().
+		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).
+		script("df -B1 --output=avail", executor.Result{Stdout: "Avail\n9999999999999\n", ExitCode: 0}).
+		script("systemctl is-active valve-node-exec.service valve-node-beacon.service", executor.Result{
+			Stdout: "active\ninactive\n", ExitCode: 3,
+		}).
+		script("ss -ltn", executor.Result{
+			Stdout: "State  Recv-Q Send-Q Local Address:Port\n" +
+				"LISTEN 0 128 127.0.0.1:8545 0.0.0.0:*\n" +
+				"LISTEN 0 128 127.0.0.1:8551 0.0.0.0:*\n" +
+				"LISTEN 0 128 127.0.0.1:5052 0.0.0.0:*\n",
+			ExitCode: 0,
+		})
+	step := preflightStep()
+	err := step.Verify(context.Background(), e, &State{Wire: testWire()})
+	if err == nil {
+		t.Fatal("want error on busy port 5052 when the beacon unit is inactive, got nil")
+	}
+	if !strings.Contains(err.Error(), "5052") {
+		t.Fatalf("error %q does not mention the busy port", err)
+	}
+}
+
 func TestPreflight_PassesWhenAllOK(t *testing.T) {
 	e := newFakeExecutor().
 		script("uname", executor.Result{Stdout: "Linux\n", ExitCode: 0}).

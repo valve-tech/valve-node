@@ -118,16 +118,49 @@ func preflightCheck(ctx context.Context, e executor.Executor, w catalog.WireConf
 		)
 	}
 
+	exempt := ownActiveUnitPorts(ctx, e)
+
 	res, err = e.Run(ctx, "ss -ltn", nil)
 	if err != nil {
 		return fmt.Errorf("preflight: ss: %w", err)
 	}
 	for _, port := range []string{execHTTPPort, enginePort, beaconHTTPPort} {
+		if exempt[port] {
+			continue
+		}
 		if strings.Contains(res.Stdout, ":"+port) {
 			return fmt.Errorf("preflight: port %s is already in use (from `ss -ltn`)", port)
 		}
 	}
 	return nil
+}
+
+// ownActiveUnitPorts checks whether valve-node's own systemd units are
+// already active and, if so, returns the set of ports the busy-port check
+// should exempt for them. This is what makes preflight idempotent when
+// re-running setup (resume/upgrade) against a box where valve-node is
+// already up: without it, the port scan can't tell our own units'
+// listeners from a stranger's and fails every re-run.
+//
+// `systemctl is-active` exits non-zero whenever any listed unit isn't
+// active, but it still prints one line per unit ("active"/"inactive"/
+// "unknown") in argument order — so the exit code is ignored and only the
+// per-line output is read.
+func ownActiveUnitPorts(ctx context.Context, e executor.Executor) map[string]bool {
+	exempt := map[string]bool{}
+	res, err := e.Run(ctx, fmt.Sprintf("systemctl is-active %s %s", execUnitName, beaconUnitName), nil)
+	if err != nil {
+		return exempt
+	}
+	lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
+	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "active" {
+		exempt[execHTTPPort] = true
+		exempt[enginePort] = true
+	}
+	if len(lines) > 1 && strings.TrimSpace(lines[1]) == "active" {
+		exempt[beaconHTTPPort] = true
+	}
+	return exempt
 }
 
 // chainArchiveSizeTB is the archive-tier dataset size per chain, ported
