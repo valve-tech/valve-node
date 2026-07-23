@@ -40,7 +40,7 @@ var clients = map[string]Client{
 		BuildCmd: `rm -rf /tmp/build-reth && ` +
 			`git clone --depth 1 https://github.com/valve-tech/reth.git /tmp/build-reth && ` +
 			`cd /tmp/build-reth && ` +
-			`(. "$HOME/.cargo/env" 2>/dev/null || true) && ` +
+			`{ . "$HOME/.cargo/env" 2>/dev/null || true; } && ` +
 			`cargo build --release --bin reth && ` +
 			`install -m 0755 target/release/reth /usr/local/bin/reth && ` +
 			`/usr/local/bin/reth --version`,
@@ -98,7 +98,7 @@ var clients = map[string]Client{
 		BuildCmd: `rm -rf /tmp/build-lighthouse-pulse && ` +
 			`git clone --depth 1 https://github.com/valve-tech/lighthouse-pulse.git /tmp/build-lighthouse-pulse && ` +
 			`cd /tmp/build-lighthouse-pulse && ` +
-			`(. "$HOME/.cargo/env" 2>/dev/null || true) && ` +
+			`{ . "$HOME/.cargo/env" 2>/dev/null || true; } && ` +
 			`cargo build --release --bin lighthouse && ` +
 			`install -m 0755 target/release/lighthouse /usr/local/bin/lighthouse-pulse && ` +
 			`/usr/local/bin/lighthouse-pulse --version`,
@@ -128,7 +128,7 @@ var clients = map[string]Client{
 		BuildCmd: `rm -rf /tmp/build-lighthouse && ` +
 			`git clone --depth 1 https://github.com/sigp/lighthouse.git /tmp/build-lighthouse && ` +
 			`cd /tmp/build-lighthouse && ` +
-			`(. "$HOME/.cargo/env" 2>/dev/null || true) && ` +
+			`{ . "$HOME/.cargo/env" 2>/dev/null || true; } && ` +
 			`cargo build --release --bin lighthouse && ` +
 			`install -m 0755 target/release/lighthouse /usr/local/bin/lighthouse && ` +
 			`/usr/local/bin/lighthouse --version`,

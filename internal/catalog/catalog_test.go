@@ -1,8 +1,14 @@
 package catalog
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/valve-tech/valve-node/internal/executor"
 )
 
 // allExecIDs / allBeaconIDs enumerate every client id in the catalog by
@@ -282,6 +288,91 @@ func TestRenderUnits_ErigonPulseArchiveFlags(t *testing.T) {
 	}
 	if strings.Contains(fullExec, "--gcmode") {
 		t.Errorf("erigon-pulse Archive=false should not contain --gcmode:\n%s", fullExec)
+	}
+}
+
+// TestRustBuildCmd_CargoEnvSourcing_NoSubshell proves that the rust clients'
+// BuildCmd sources ~/.cargo/env in a brace group (current-shell grouping),
+// not a subshell — a subshell's PATH edit dies with the subshell, so `cargo
+// build` fails with "cargo: not found" on a fresh box where rustup installed
+// cargo to ~/.cargo/bin. It also proves the brace-group form still preserves
+// short-circuiting: if the preceding clone/cd fails, cargo must never run.
+func TestRustBuildCmd_CargoEnvSourcing_NoSubshell(t *testing.T) {
+	rustClients := []string{"reth", "lighthouse-pulse", "lighthouse"}
+	wantGroup := `{ . "$HOME/.cargo/env" 2>/dev/null || true; } && cargo`
+
+	for _, id := range rustClients {
+		id := id
+		t.Run(id, func(t *testing.T) {
+			c, ok := ClientByID(id)
+			if !ok {
+				t.Fatalf("ClientByID(%q) not found", id)
+			}
+			if !strings.Contains(c.BuildCmd, wantGroup) {
+				t.Fatalf("client %q BuildCmd does not contain brace-group cargo-env sourcing %q:\n%s", id, wantGroup, c.BuildCmd)
+			}
+
+			// Build a scratch HOME with a fake ~/.cargo/env (mimicking rustup's
+			// installer) that puts a stub `cargo` on PATH.
+			tmp := t.TempDir()
+			fakebin := filepath.Join(tmp, "fakebin")
+			if err := os.MkdirAll(fakebin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cargoEnv := filepath.Join(tmp, ".cargo", "env")
+			if err := os.MkdirAll(filepath.Dir(cargoEnv), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			envScript := fmt.Sprintf("export PATH=\"%s:$PATH\"\n", fakebin)
+			if err := os.WriteFile(cargoEnv, []byte(envScript), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cargoStub := filepath.Join(fakebin, "cargo")
+			if err := os.WriteFile(cargoStub, []byte("#!/bin/sh\necho cargo-stub-ok\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			exe := executor.NewLocal()
+			ctx := context.Background()
+
+			// Property 1: the recipe's literal brace-group form keeps the PATH
+			// edit alive past the sourcing statement, so cargo resolves.
+			newForm := fmt.Sprintf(`export HOME='%s'; { . "$HOME/.cargo/env" 2>/dev/null || true; } && cargo --version`, tmp)
+			res, err := exe.Run(ctx, newForm, nil)
+			if err != nil {
+				t.Fatalf("brace-group form run error: %v", err)
+			}
+			if res.ExitCode != 0 {
+				t.Errorf("brace-group form exited %d, want 0; stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
+			}
+
+			// Discriminator: under the identical scratch HOME, the OLD
+			// parenthesized-subshell form must fail, proving this test actually
+			// distinguishes the two forms rather than passing regardless.
+			oldForm := fmt.Sprintf(`export HOME='%s'; (. "$HOME/.cargo/env" 2>/dev/null || true) && cargo --version`, tmp)
+			res2, err := exe.Run(ctx, oldForm, nil)
+			if err != nil {
+				t.Fatalf("subshell form run error: %v", err)
+			}
+			if res2.ExitCode == 0 {
+				t.Errorf("subshell form unexpectedly exited 0 under scratch HOME — test does not discriminate old vs new")
+			}
+
+			// Property 2: short-circuiting is preserved — if the step before the
+			// brace group fails, the brace group and everything after it (here,
+			// `echo RAN`) must never execute.
+			shortCircuit := fmt.Sprintf(`export HOME='%s'; false && { . "$HOME/.cargo/env" 2>/dev/null || true; } && echo RAN`, tmp)
+			res3, err := exe.Run(ctx, shortCircuit, nil)
+			if err != nil {
+				t.Fatalf("short-circuit run error: %v", err)
+			}
+			if res3.ExitCode == 0 {
+				t.Errorf("short-circuit command exited 0, want nonzero")
+			}
+			if strings.Contains(res3.Stdout, "RAN") {
+				t.Errorf("short-circuit command ran echo RAN despite an earlier `false`; stdout=%q", res3.Stdout)
+			}
+		})
 	}
 }
 
