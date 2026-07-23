@@ -1,0 +1,13 @@
+# Go
+/valve-node
+*.test
+*.out
+
+# Web tooling
+cmd/valve-node/web/node_modules/
+
+# goreleaser
+/dist/
+
+# OS
+.DS_Store
