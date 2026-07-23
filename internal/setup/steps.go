@@ -473,7 +473,15 @@ func handshakeCheck(ctx context.Context, e executor.Executor, w catalog.WireConf
 	return nil
 }
 
-var authErrorPattern = regexp.MustCompile(`(?i)jwt|401|unauthorized`)
+// authErrorPattern alone is not enough to identify a real auth failure:
+// prysm logs benign lines that match it too (its --help output for
+// --jwt-secret on flag errors during earlier crash-loops, and the routine
+// startup INFO line "Finished reading JWT secret from ...jwt.hex"). A line
+// is only flagged when it also carries an error-level indicator.
+var (
+	authErrorPattern = regexp.MustCompile(`(?i)jwt|401|unauthorized`)
+	errLevelPattern  = regexp.MustCompile(`(?i)(level=(warn(ing)?|error|fatal)|\bERRO\b|\bCRIT\b|\bFATAL\b|authentication failed|invalid)`)
+)
 
 func authErrorLines(journal string) []string {
 	var out []string
@@ -481,7 +489,7 @@ func authErrorLines(journal string) []string {
 		if line == "" {
 			continue
 		}
-		if authErrorPattern.MatchString(line) {
+		if authErrorPattern.MatchString(line) && errLevelPattern.MatchString(line) {
 			out = append(out, line)
 		}
 	}

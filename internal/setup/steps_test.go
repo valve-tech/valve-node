@@ -366,7 +366,7 @@ func TestHandshake_FailureIncludesOffendingLogLines(t *testing.T) {
 		script("eth/v1/node/syncing", executor.Result{Stdout: "200"}).
 		script("eth_syncing", executor.Result{Stdout: `{"jsonrpc":"2.0","id":1,"result":false}`}).
 		script("journalctl -u valve-node-beacon.service", executor.Result{
-			Stdout: "beacon: ok line\nERR engine api: 401 Unauthorized: bad jwt\nbeacon: another ok line\n",
+			Stdout: "beacon: ok line\ntime=\"...\" level=error msg=\"Could not connect to execution endpoint\" error=\"401 Unauthorized: bad jwt\"\nbeacon: another ok line\n",
 		})
 
 	step := handshakeStep()
@@ -377,6 +377,51 @@ func TestHandshake_FailureIncludesOffendingLogLines(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "401 Unauthorized: bad jwt") {
 		t.Fatalf("error does not embed the offending journalctl line: %v", err)
+	}
+}
+
+// TestAuthErrorLines_RequiresErrorLevelIndicator locks in the E2E-discovered
+// false negative: prysm logs benign lines that match the bare jwt|401|
+// unauthorized pattern (its --help output, and the routine "Finished
+// reading JWT secret" INFO line). Without also requiring an error-level
+// indicator on the same line, handshake can never pass against prysm.
+func TestAuthErrorLines_RequiresErrorLevelIndicator(t *testing.T) {
+	tests := []struct {
+		name    string
+		line    string
+		wantHit bool
+	}{
+		{
+			name:    "benign prysm INFO line reading the jwt secret",
+			line:    `time="2026-07-23 03:32:09" level=info msg="Finished reading JWT secret from /var/lib/valve-node/943/jwt.hex" prefix=execution`,
+			wantHit: false,
+		},
+		{
+			name:    "benign prysm --help output for the --jwt-secret flag",
+			line:    `   --jwt-secret value                                                  REQUIRED if connecting to an execution node via HTTP. Provides a path to a file...`,
+			wantHit: false,
+		},
+		{
+			name:    "real error-level auth failure",
+			line:    `time="..." level=error msg="Could not connect to execution endpoint" error="401 Unauthorized: invalid JWT token"`,
+			wantHit: true,
+		},
+		{
+			name:    "real ERRO-level line referencing jwt with no other auth text",
+			line:    `ERRO[07-23|03:00:00] Beacon client online, but no consensus updates received... jwt`,
+			wantHit: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := authErrorLines(tc.line)
+			if tc.wantHit && len(got) == 0 {
+				t.Fatalf("want line flagged as an auth error, but it was not: %q", tc.line)
+			}
+			if !tc.wantHit && len(got) != 0 {
+				t.Fatalf("want line NOT flagged as an auth error, but it was: %q (matched: %v)", tc.line, got)
+			}
+		})
 	}
 }
 
@@ -464,7 +509,7 @@ func TestHandshake_RunTimesOutWithOffendingLines(t *testing.T) {
 		script("eth/v1/node/syncing", executor.Result{Stdout: "200"}).
 		script("eth_syncing", executor.Result{Stdout: `{"jsonrpc":"2.0","id":1,"result":false}`}).
 		script("journalctl -u valve-node-beacon.service", executor.Result{
-			Stdout: "ERR 401 unauthorized: jwt mismatch\n",
+			Stdout: "level=error msg=\"401 unauthorized: jwt mismatch\"\n",
 		})
 
 	step := handshakeStep()
