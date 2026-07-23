@@ -311,8 +311,22 @@ export function getFirewallChecklist(id: string): Promise<CheckItem[]> {
   return request<CheckItem[]>(`/api/targets/${encodeURIComponent(id)}/firewall`);
 }
 
-export function getNetworkDiagnostics(id: string): Promise<CheckItem[]> {
-  return request<CheckItem[]>(`/api/targets/${encodeURIComponent(id)}/diagnostics`);
+// DiagReport mirrors server.DiagReport: one diagnostics-ladder run — items
+// in order, stopping at the first failure — plus when it ran and what
+// triggered it ("manual", "journal: <signature>", "monitor: <condition>").
+export interface DiagReport {
+  at: string;
+  trigger: string;
+  items: CheckItem[];
+  failedId?: string;
+}
+
+export function runNetworkDiagnostics(id: string): Promise<DiagReport> {
+  return request<DiagReport>(`/api/targets/${encodeURIComponent(id)}/diagnostics`);
+}
+
+export function getLatestDiagnostics(id: string): Promise<DiagReport | null> {
+  return request<DiagReport | null>(`/api/targets/${encodeURIComponent(id)}/diagnostics/latest`);
 }
 
 // ---------------------------------------------------------------------
