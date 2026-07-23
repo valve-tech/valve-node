@@ -102,7 +102,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if q := r.URL.Query().Get("token"); q != "" {
-			if q != s.cfg.Token {
+			if !tokensEqual(q, s.cfg.Token) {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
