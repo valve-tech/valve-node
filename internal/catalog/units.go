@@ -161,7 +161,11 @@ func execCommand(w WireConfig) (string, error) {
 		case 369:
 			cmd += " --pulsechain"
 		case 943:
-			cmd += " --pulsechain.testnet"
+			// Verified E2E against the built go-pulse binary's --help on a
+			// live box: --pulsechain.testnet is rejected ("flag provided
+			// but not defined: -pulsechain.testnet"); the real selector is
+			// --pulsechain-testnet-v4.
+			cmd += " --pulsechain-testnet-v4"
 		default:
 			return "", fmt.Errorf("catalog: go-pulse is not valid on chain id %d", w.ChainID)
 		}
@@ -223,7 +227,11 @@ func beaconCommand(w WireConfig, net Network) (string, error) {
 		case 369:
 			cmd += " --pulsechain"
 		case 943:
-			cmd += " --pulsechain-testnet"
+			// Verified E2E against the built prysm-pulse binary's --help on
+			// a live box: --pulsechain-testnet is rejected ("flag provided
+			// but not defined: -pulsechain-testnet"); the real selector is
+			// --pulsechain-testnet-v4.
+			cmd += " --pulsechain-testnet-v4"
 		default:
 			return "", fmt.Errorf("catalog: prysm-pulse is not valid on chain id %d", w.ChainID)
 		}

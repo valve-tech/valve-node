@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -402,6 +403,78 @@ func TestClients_BuildCmdMatchesRepo(t *testing.T) {
 
 			if cloneURLNorm != repoNorm {
 				t.Errorf("client %q: BuildCmd clones %q but Repo is %q", id, cloneURL, c.Repo)
+			}
+		})
+	}
+}
+
+// TestRenderUnits_PulseNetworkSelectorFlags is a golden-value regression
+// test for the go-pulse and prysm-pulse network-selector flags, verified
+// E2E against the actual built binaries' --help on a live box:
+//
+//	go-pulse:   --pulsechain (369) / --pulsechain-testnet-v4 (943)
+//	prysm-pulse: --pulsechain (369) / --pulsechain-testnet-v4 (943)
+//
+// The previous invented forms (--pulsechain.testnet, --pulsechain-testnet)
+// are rejected by the binaries with "flag provided but not defined".
+func TestRenderUnits_PulseNetworkSelectorFlags(t *testing.T) {
+	// badTestnetFlag matches the old, wrong --pulsechain-testnet flag as an
+	// exact token (not as a substring prefix of --pulsechain-testnet-v4).
+	badTestnetFlag := regexp.MustCompile(`--pulsechain-testnet(\s|$)`)
+
+	cases := []struct {
+		name        string
+		w           WireConfig
+		wantExec    []string
+		wantBeacon  []string
+		notWantExec []string
+		notWantBcn  []string
+	}{
+		{
+			name: "943 go-pulse + prysm-pulse",
+			w: WireConfig{
+				ChainID: 943, ExecID: "go-pulse", BeaconID: "prysm-pulse",
+				DataDir: "/var/lib/valve-node/943",
+			},
+			wantExec:   []string{"--pulsechain-testnet-v4"},
+			wantBeacon: []string{"--pulsechain-testnet-v4"},
+		},
+		{
+			name: "369 go-pulse + prysm-pulse",
+			w: WireConfig{
+				ChainID: 369, ExecID: "go-pulse", BeaconID: "prysm-pulse",
+				DataDir: "/var/lib/valve-node/369",
+			},
+			wantExec:   []string{"--pulsechain"},
+			wantBeacon: []string{"--pulsechain"},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			execUnit, beaconUnit, err := RenderUnits(tc.w)
+			if err != nil {
+				t.Fatalf("RenderUnits: %v", err)
+			}
+			for _, want := range tc.wantExec {
+				if !strings.Contains(execUnit, want) {
+					t.Errorf("exec unit missing %q\n%s", want, execUnit)
+				}
+			}
+			for _, want := range tc.wantBeacon {
+				if !strings.Contains(beaconUnit, want) {
+					t.Errorf("beacon unit missing %q\n%s", want, beaconUnit)
+				}
+			}
+			if strings.Contains(execUnit, "--pulsechain.testnet") {
+				t.Errorf("exec unit contains invented flag --pulsechain.testnet\n%s", execUnit)
+			}
+			if badTestnetFlag.MatchString(execUnit) {
+				t.Errorf("exec unit contains invented flag --pulsechain-testnet (exact token)\n%s", execUnit)
+			}
+			if badTestnetFlag.MatchString(beaconUnit) {
+				t.Errorf("beacon unit contains invented flag --pulsechain-testnet (exact token)\n%s", beaconUnit)
 			}
 		})
 	}
