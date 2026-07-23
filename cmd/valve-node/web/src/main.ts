@@ -33,6 +33,18 @@ function parseHash(): Route {
   return { screen: screen ?? "targets" };
 }
 
+// mount gives a screen a brand-new child element of contentEl to render
+// into and discards the previous one. Screens attach their delegated click
+// listeners (via onAction) to the root element they're passed, not to
+// contentEl itself — so a fresh node per screen means those listeners are
+// discarded with the old node on every navigation instead of stacking up
+// on the page-lifetime contentEl.
+function mount(render: (root: HTMLElement) => Cleanup): Cleanup {
+  const screenEl = document.createElement("div");
+  contentEl.replaceChildren(screenEl);
+  return render(screenEl);
+}
+
 function route(): void {
   if (currentCleanup) {
     try {
@@ -52,28 +64,28 @@ function route(): void {
         location.hash = "#/targets";
         return;
       }
-      currentCleanup = renderWizard(contentEl, id);
+      currentCleanup = mount((root) => renderWizard(root, id));
       break;
     case "dash":
       if (!id) {
         location.hash = "#/targets";
         return;
       }
-      currentCleanup = renderDashboard(contentEl, id);
+      currentCleanup = mount((root) => renderDashboard(root, id));
       break;
     case "logs":
       if (!id) {
         location.hash = "#/targets";
         return;
       }
-      currentCleanup = renderLogs(contentEl, id);
+      currentCleanup = mount((root) => renderLogs(root, id));
       break;
     case "settings":
-      currentCleanup = renderSettings(contentEl);
+      currentCleanup = mount((root) => renderSettings(root));
       break;
     case "targets":
     default:
-      currentCleanup = renderTargets(contentEl);
+      currentCleanup = mount((root) => renderTargets(root));
       break;
   }
 }

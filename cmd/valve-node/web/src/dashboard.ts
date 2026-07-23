@@ -14,16 +14,19 @@ export function renderDashboard(root: HTMLElement, targetId: string): () => void
   let prevSnapshot: api.Snapshot | null = null;
   let execBlocksPerSec: number | null = null;
 
-  root.innerHTML = `<h1>Dashboard: ${escapeHtml(targetId)}</h1><div id="dash-body"><p class="muted">Loading…</p></div>${footer()}`;
+  root.innerHTML = `<h1>Dashboard: ${escapeHtml(targetId)}</h1><div id="dash-body"><p class="muted">Loading…</p></div><div id="dash-footer">${footer()}</div>`;
   const body = root.querySelector<HTMLElement>("#dash-body")!;
+  const footerEl = root.querySelector<HTMLElement>("#dash-footer")!;
 
   init();
 
   async function init(): Promise<void> {
     let target: api.Target | undefined;
+    let catalog: api.Catalog | undefined;
     try {
-      const targets = await api.listTargets();
+      const [targets, cat] = await Promise.all([api.listTargets(), api.getCatalog()]);
       target = targets.find((t) => t.id === targetId);
+      catalog = cat;
     } catch (err) {
       if (disposed) return;
       body.innerHTML = `<p class="error">Failed to load target: ${escapeHtml(String(err))}</p>`;
@@ -39,6 +42,9 @@ export function renderDashboard(root: HTMLElement, targetId: string): () => void
       body.innerHTML = `<p class="muted">This target hasn't completed setup yet. <a href="#/setup/${encodeURIComponent(targetId)}">Run the setup wizard →</a></p>`;
       return;
     }
+
+    const net = catalog?.networks.find((n) => n.ChainID === target!.wire!.ChainID);
+    if (net) footerEl.innerHTML = footer(net.Name, net.LearnURL);
 
     body.innerHTML = `<p class="muted">Connecting…</p>`;
     streamStop = api.streamMonitor(targetId, (snap) => {

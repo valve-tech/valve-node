@@ -72,8 +72,9 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
     streamStop: null,
   };
 
-  root.innerHTML = `<h1>Setup: ${escapeHtml(targetId)}</h1><div id="wizard-body"><p class="muted">Loading catalog…</p></div>${footer()}`;
+  root.innerHTML = `<h1>Setup: ${escapeHtml(targetId)}</h1><div id="wizard-body"><p class="muted">Loading catalog…</p></div><div id="wizard-footer">${footer()}</div>`;
   const body = root.querySelector<HTMLElement>("#wizard-body")!;
+  const footerEl = root.querySelector<HTMLElement>("#wizard-footer")!;
 
   onAction(root, (action, el) => {
     handleAction(action, el);
@@ -112,6 +113,14 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
       ${wizardProgress(state.step)}
       ${renderStep()}
     `;
+    updateFooter();
+  }
+
+  // updateFooter refreshes the "learn more" link's per-context deep link to
+  // the currently selected network's LearnURL, once a network is chosen.
+  function updateFooter(): void {
+    const net = state.catalog?.networks.find((n) => n.ChainID === state.chainId);
+    footerEl.innerHTML = net ? footer(net.Name, net.LearnURL) : footer();
   }
 
   function renderStep(): string {

@@ -26,9 +26,10 @@ export function renderLogs(root: HTMLElement, targetId: string): () => void {
   root.innerHTML = `
     <h1>Logs: ${escapeHtml(targetId)}</h1>
     <div id="logs-body"><p class="muted">Loading…</p></div>
-    ${footer()}
+    <div id="logs-footer">${footer()}</div>
   `;
   const body = root.querySelector<HTMLElement>("#logs-body")!;
+  const footerEl = root.querySelector<HTMLElement>("#logs-footer")!;
 
   onAction(root, (action) => {
     if (action === "explain") void openExplainFlow();
@@ -38,9 +39,11 @@ export function renderLogs(root: HTMLElement, targetId: string): () => void {
 
   async function init(): Promise<void> {
     let target: api.Target | undefined;
+    let catalog: api.Catalog | undefined;
     try {
-      const targets = await api.listTargets();
+      const [targets, cat] = await Promise.all([api.listTargets(), api.getCatalog()]);
       target = targets.find((t) => t.id === targetId);
+      catalog = cat;
     } catch (err) {
       if (disposed) return;
       body.innerHTML = `<p class="error">Failed to load target: ${escapeHtml(String(err))}</p>`;
@@ -56,6 +59,9 @@ export function renderLogs(root: HTMLElement, targetId: string): () => void {
       body.innerHTML = `<p class="muted">This target hasn't completed setup yet. <a href="#/setup/${encodeURIComponent(targetId)}">Run the setup wizard →</a></p>`;
       return;
     }
+
+    const net = catalog?.networks.find((n) => n.ChainID === target!.wire!.ChainID);
+    if (net) footerEl.innerHTML = footer(net.Name, net.LearnURL);
 
     try {
       const recent = await api.getLogs(targetId, 200);
