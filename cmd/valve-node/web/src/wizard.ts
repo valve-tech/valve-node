@@ -57,6 +57,9 @@ interface State {
   execHTTPPort: string;
   beaconHTTPPort: string;
   execP2PPort: string;
+  execHTTPPortError: string | null;
+  beaconHTTPPortError: string | null;
+  execP2PPortError: string | null;
   starting: boolean;
   startError: string | null;
   events: api.SetupEvent[];
@@ -79,6 +82,9 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
     execHTTPPort: "",
     beaconHTTPPort: "",
     execP2PPort: "",
+    execHTTPPortError: null,
+    beaconHTTPPortError: null,
+    execP2PPortError: null,
     starting: false,
     startError: null,
     events: [],
@@ -249,14 +255,17 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
             Execution HTTP port <span class="muted">(default: ${DEFAULT_EXEC_HTTP_PORT})</span>
             <input id="exec-http-port-input" type="text" inputmode="numeric" placeholder="${DEFAULT_EXEC_HTTP_PORT}" value="${escapeHtml(state.execHTTPPort)}" />
           </label>
+          ${state.execHTTPPortError ? `<p class="error small">${escapeHtml(state.execHTTPPortError)}</p>` : ""}
           <label>
             Beacon HTTP port <span class="muted">(default: ${DEFAULT_BEACON_HTTP_PORT})</span>
             <input id="beacon-http-port-input" type="text" inputmode="numeric" placeholder="${DEFAULT_BEACON_HTTP_PORT}" value="${escapeHtml(state.beaconHTTPPort)}" />
           </label>
+          ${state.beaconHTTPPortError ? `<p class="error small">${escapeHtml(state.beaconHTTPPortError)}</p>` : ""}
           <label>
             Execution p2p port <span class="muted">(default: ${DEFAULT_EXEC_P2P_PORT})</span>
             <input id="exec-p2p-port-input" type="text" inputmode="numeric" placeholder="${DEFAULT_EXEC_P2P_PORT}" value="${escapeHtml(state.execP2PPort)}" />
           </label>
+          ${state.execP2PPortError ? `<p class="error small">${escapeHtml(state.execP2PPortError)}</p>` : ""}
           <p class="muted small">
             Leave any of these blank to use the default. The engine API port (8551) is fixed and
             loopback-only — it isn't configurable.
@@ -403,6 +412,10 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
         break;
       case "goto-review":
         readModeInputs();
+        if (state.execHTTPPortError || state.beaconHTTPPortError || state.execP2PPortError) {
+          render();
+          break;
+        }
         state.step = "review";
         render();
         break;
@@ -435,18 +448,46 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
     if (execHTTPPortInput) state.execHTTPPort = execHTTPPortInput.value.trim();
     if (beaconHTTPPortInput) state.beaconHTTPPort = beaconHTTPPortInput.value.trim();
     if (execP2PPortInput) state.execP2PPort = execP2PPortInput.value.trim();
+
+    state.execHTTPPortError = parsePort(state.execHTTPPort).error ?? null;
+    state.beaconHTTPPortError = parsePort(state.beaconHTTPPort).error ?? null;
+    state.execP2PPortError = parsePort(state.execP2PPort).error ?? null;
   }
 
-  // portOverride parses a port field's raw string and returns it only if
-  // it's a valid positive integer that differs from def — the wizard never
-  // sends a port field equal to the server's own default, since "not set"
-  // and "set to default" are indistinguishable once persisted anyway (see
-  // api.ts's WireConfig comment).
+  // VALID_PORT_RE matches only a plain, unsigned decimal integer — no
+  // decimal point, sign, exponent, or leading/trailing whitespace (already
+  // trimmed by the caller). Number.parseInt would happily read "8080.5" as
+  // 8080 and silently swallow the invalid suffix, so raw input is checked
+  // against this regex before any numeric parsing happens.
+  const VALID_PORT_RE = /^\d+$/;
+
+  // parsePort validates a raw port field string against the 1-65535 range
+  // (0 is reserved for "use the server's default" and is expressed by
+  // leaving the field blank, never by typing "0" — see the port fields'
+  // "leave blank for default" help text). Returns a user-facing error
+  // message when the value is present but invalid.
+  function parsePort(raw: string): { port?: number; error?: string } {
+    if (!raw) return {};
+    if (!VALID_PORT_RE.test(raw)) {
+      return { error: "Enter a whole number (no decimals, signs, or other characters)." };
+    }
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1 || n > 65535) {
+      return { error: "Port must be between 1 and 65535." };
+    }
+    return { port: n };
+  }
+
+  // portOverride returns raw's parsed port only if it's valid and differs
+  // from def — the wizard never sends a port field equal to the server's
+  // own default, since "not set" and "set to default" are indistinguishable
+  // once persisted anyway (see api.ts's WireConfig comment). Invalid values
+  // are dropped here defensively; readModeInputs is what surfaces the
+  // inline field error and blocks navigation to review in the first place.
   function portOverride(raw: string, def: number): number | undefined {
-    if (!raw) return undefined;
-    const n = Number.parseInt(raw, 10);
-    if (!Number.isFinite(n) || n <= 0 || n === def) return undefined;
-    return n;
+    const { port } = parsePort(raw);
+    if (port === undefined || port === def) return undefined;
+    return port;
   }
 
   async function startSetup(): Promise<void> {

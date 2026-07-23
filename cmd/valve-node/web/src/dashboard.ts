@@ -142,7 +142,7 @@ export function renderDashboard(root: HTMLElement, targetId: string): () => void
         ${beaconSyncCard(snap)}
         ${peersCard(snap)}
         ${diskCard(snap)}
-        ${storageCard()}
+        ${storageCard(snap)}
         ${endpointsCard()}
         ${servicesCard(snap)}
       </div>
@@ -150,7 +150,12 @@ export function renderDashboard(root: HTMLElement, targetId: string): () => void
     `;
   }
 
-  function execSyncCard(snap: api.Snapshot): string {
+  // syncETA computes the execution head's lag behind the reference head and
+  // a human ETA at the current smoothed rate (execBlocksPerSec, updated by
+  // updateRate on every monitor tick). Shared by the Execution-sync card
+  // and the Storage card, so both surface the same rate-based estimate
+  // instead of drifting out of sync with each other.
+  function syncETA(snap: api.Snapshot): { lag: number | null; eta: string } {
     const hasRef = snap.refHead > 0;
     const lag = hasRef ? snap.refHead - snap.execHead : null;
     const eta =
@@ -159,6 +164,11 @@ export function renderDashboard(root: HTMLElement, targetId: string): () => void
         : lag !== null && lag <= 0
           ? "caught up"
           : "—";
+    return { lag, eta };
+  }
+
+  function execSyncCard(snap: api.Snapshot): string {
+    const { lag, eta } = syncETA(snap);
 
     return `
       <div class="card">
@@ -166,7 +176,7 @@ export function renderDashboard(root: HTMLElement, targetId: string): () => void
         <p>${snap.execSyncing ? badge("syncing", "warn") : badge("synced", "ok")}</p>
         <dl class="stat-list">
           <div><dt>Local head</dt><dd>${fmtInt(snap.execHead)}</dd></div>
-          <div><dt>Reference head</dt><dd>${hasRef ? fmtInt(snap.refHead) : "unavailable"}</dd></div>
+          <div><dt>Reference head</dt><dd>${lag !== null ? fmtInt(snap.refHead) : "unavailable"}</dd></div>
           <div><dt>Lag</dt><dd>${lag !== null ? fmtInt(Math.max(lag, 0)) + " blocks" : "—"}</dd></div>
           <div><dt>ETA</dt><dd>${eta}</dd></div>
         </dl>
@@ -213,7 +223,13 @@ export function renderDashboard(root: HTMLElement, targetId: string): () => void
   // storageCard shows per-service current-vs-expected disk usage. These are
   // estimates ported from learn.valve.city's snapshot table, not live
   // measurements of the eventual synced size — labeled as such per the spec.
-  function storageCard(): string {
+  // Per spec §3, it also surfaces the same rate-based ETA the
+  // Execution-sync card computes (execBlocksPerSec) alongside the
+  // current-vs-expected bar — only while the exec head is actually
+  // advancing; it's omitted (not shown as "—" or "caught up") once there's
+  // no meaningful rate to estimate from, since a stalled or already-synced
+  // node has no "time remaining" to speak of here.
+  function storageCard(snap: api.Snapshot): string {
     if (duErr) {
       return `
         <div class="card card-warn">
@@ -228,12 +244,15 @@ export function renderDashboard(root: HTMLElement, targetId: string): () => void
     }
     const execPct = du.ExpectedExecBytes > 0 ? Math.min((du.ExecBytes / du.ExpectedExecBytes) * 100, 100) : 0;
     const beaconPct = du.ExpectedBeaconBytes > 0 ? Math.min((du.BeaconBytes / du.ExpectedBeaconBytes) * 100, 100) : 0;
+    const { lag, eta } = syncETA(snap);
+    const advancing = lag !== null && lag > 0 && execBlocksPerSec !== null && execBlocksPerSec > 0;
     return `
       <div class="card">
         <h3>Storage</h3>
         <p class="muted small">Estimate — varies by client and pruning.</p>
         <p class="muted small">Execution — ${fmtBytes(du.ExecBytes)} of ~${fmtBytes(du.ExpectedExecBytes)}</p>
         <div class="meter"><div class="meter-fill" style="width:${execPct}%"></div></div>
+        ${advancing ? `<p class="muted small">Estimated time remaining: ${escapeHtml(eta)}</p>` : ""}
         <p class="muted small">Beacon — ${fmtBytes(du.BeaconBytes)} of ~${fmtBytes(du.ExpectedBeaconBytes)}</p>
         <div class="meter"><div class="meter-fill" style="width:${beaconPct}%"></div></div>
         <dl class="stat-list">

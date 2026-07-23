@@ -558,6 +558,37 @@ func TestSetupKickoffOnUnknownTargetIs404(t *testing.T) {
 	}
 }
 
+// TestSetupKickoffRejectsOutOfRangePorts guards against a WireConfig with a
+// port field outside 0..65535 (0 means "use default") ever reaching
+// setup.Plan — the wizard is expected to validate client-side too, but the
+// server must not trust it.
+func TestSetupKickoffRejectsOutOfRangePorts(t *testing.T) {
+	a := newAPITestServer(t)
+
+	res := a.do(t, "POST", "/api/targets", config.Target{ID: "local", Mode: "local"})
+	res.Body.Close()
+
+	cases := []struct {
+		name string
+		wire catalog.WireConfig
+	}{
+		{"exec HTTP port too high", catalog.WireConfig{ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse", ExecHTTPPort: 65536}},
+		{"exec HTTP port negative", catalog.WireConfig{ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse", ExecHTTPPort: -1}},
+		{"beacon HTTP port too high", catalog.WireConfig{ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse", BeaconHTTPPort: 70000}},
+		{"exec p2p port too high", catalog.WireConfig{ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse", ExecP2PPort: 100000}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := a.do(t, "POST", "/api/targets/local/setup", tc.wire)
+			if res.StatusCode != http.StatusBadRequest {
+				body, _ := io.ReadAll(res.Body)
+				t.Fatalf("status = %d, want 400, body=%s", res.StatusCode, body)
+			}
+			res.Body.Close()
+		})
+	}
+}
+
 // TestDeleteTargetCancelsInFlightSetupBeforeClosingExecutor is the
 // use-after-close regression test: it kicks off a real setup run against a
 // blockingExecutor, waits for the run to genuinely be blocked mid-step,

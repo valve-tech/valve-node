@@ -593,12 +593,37 @@ func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 // setup kickoff + SSE progress stream
 // ---------------------------------------------------------------------
 
+// validateWirePorts rejects any of WireConfig's port fields that fall
+// outside 0..65535 — 0 means "use the default" (see catalog.WireConfig),
+// so it's the only value below 1 that's allowed. The wizard UI validates
+// the same range client-side, but the server can't trust that.
+func validateWirePorts(wire catalog.WireConfig) error {
+	ports := []struct {
+		name string
+		port int
+	}{
+		{"ExecHTTPPort", wire.ExecHTTPPort},
+		{"BeaconHTTPPort", wire.BeaconHTTPPort},
+		{"ExecP2PPort", wire.ExecP2PPort},
+	}
+	for _, p := range ports {
+		if p.port < 0 || p.port > 65535 {
+			return fmt.Errorf("%s: %d is out of range (must be 0 for default, or 1-65535)", p.name, p.port)
+		}
+	}
+	return nil
+}
+
 func (s *Server) handleStartSetup(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var wire catalog.WireConfig
 	if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := validateWirePorts(wire); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if wire.DataDir == "" {
