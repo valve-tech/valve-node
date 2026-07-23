@@ -44,6 +44,11 @@ jobs:
       - name: go build
         run: go build ./cmd/valve-node
 
+      - name: cross-compile (windows, darwin)
+        run: |
+          GOOS=windows go build ./...
+          GOOS=darwin go build ./...
+
   release:
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
