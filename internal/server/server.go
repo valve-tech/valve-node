@@ -6,15 +6,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/cookiejar"
 	"strings"
+	"sync"
 
-	"github.com/valve-tech/valve-node/internal/monitor"
+	"github.com/valve-tech/valve-node/internal/ai"
+	"github.com/valve-tech/valve-node/internal/config"
+	"github.com/valve-tech/valve-node/internal/executor"
 )
 
 // cookieName is the name of the cookie that carries the session token once
@@ -29,20 +30,41 @@ type Config struct {
 	Token string
 	// UI is the filesystem the static web UI is served from.
 	UI fs.FS
-	// Monitor, if set, backs GET /api/monitor/stream. This is provisional
-	// wiring for Task 5 — the full route table lands in Task 7, which may
-	// fold this into a broader dependency struct.
-	Monitor *monitor.Monitor
+	// NewExecutor builds the executor.Executor for a config.Target — local
+	// or SSH depending on Target.Mode. Injectable for tests (a fake); nil
+	// selects defaultNewExecutor, which dials the real thing.
+	NewExecutor func(config.Target) (executor.Executor, error)
+	// NewAIProvider builds an ai.Provider by id. Injectable for tests; nil
+	// selects ai.New.
+	NewAIProvider func(id, apiKey, baseURL string) (ai.Provider, error)
 }
 
 // Server is the valve-node local HTTP server.
 type Server struct {
 	cfg Config
+
+	// cfgMu serializes read-modify-write access to the on-disk
+	// internal/config file across concurrent API requests.
+	cfgMu sync.Mutex
+
+	reg *registry
+
+	newExecutor   func(config.Target) (executor.Executor, error)
+	newAIProvider func(id, apiKey, baseURL string) (ai.Provider, error)
 }
 
 // New constructs a Server from the given Config.
 func New(cfg Config) *Server {
-	return &Server{cfg: cfg}
+	s := &Server{cfg: cfg, reg: newRegistry()}
+	s.newExecutor = cfg.NewExecutor
+	if s.newExecutor == nil {
+		s.newExecutor = defaultNewExecutor
+	}
+	s.newAIProvider = cfg.NewAIProvider
+	if s.newAIProvider == nil {
+		s.newAIProvider = ai.New
+	}
+	return s
 }
 
 // NewSessionToken returns a new random session token: 16 bytes of
@@ -64,7 +86,7 @@ func (s *Server) Handler() http.Handler {
 		w.Write([]byte(`{"ok":true}` + "\n"))
 	})
 
-	mux.HandleFunc("GET /api/monitor/stream", s.handleMonitorStream)
+	s.registerAPIRoutes(mux)
 
 	uiHandler := http.FileServerFS(s.cfg.UI)
 	mux.Handle("/", uiHandler)
@@ -108,55 +130,6 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	})
-}
-
-// handleMonitorStream streams monitor.Snapshot JSON as
-// text/event-stream, one `data: <json>\n\n` event per subscriber tick. The
-// current Latest() snapshot is sent immediately on connect so a new
-// subscriber doesn't wait a full poll interval for its first event.
-func (s *Server) handleMonitorStream(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.Monitor == nil {
-		http.Error(w, "monitor not configured", http.StatusServiceUnavailable)
-		return
-	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
-	ch, unsub := s.cfg.Monitor.Subscribe()
-	defer unsub()
-
-	writeSnapshotEvent(w, s.cfg.Monitor.Latest())
-	flusher.Flush()
-
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case snap, ok := <-ch:
-			if !ok {
-				return
-			}
-			writeSnapshotEvent(w, snap)
-			flusher.Flush()
-		}
-	}
-}
-
-func writeSnapshotEvent(w http.ResponseWriter, snap monitor.Snapshot) {
-	b, err := json.Marshal(snap)
-	if err != nil {
-		return
-	}
-	fmt.Fprintf(w, "data: %s\n\n", b)
 }
 
 // ListenAndServe runs the server until ctx is canceled.

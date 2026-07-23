@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"syscall"
 
+	"github.com/valve-tech/valve-node/internal/config"
 	"github.com/valve-tech/valve-node/internal/server"
 )
 
@@ -26,6 +27,15 @@ func main() {
 	bind := flag.String("bind", "127.0.0.1:8799", "address to bind the local server to")
 	noOpen := flag.Bool("no-open", false, "do not open a browser window automatically")
 	flag.Parse()
+
+	// Load (or lazily create on first Save) valve-node's local state —
+	// known targets, AI provider settings — from ~/.valve-node/config.json.
+	// The server re-reads it per-request rather than holding this value, so
+	// it's only loaded here to fail fast on a corrupt file before the
+	// server starts serving.
+	if _, err := config.Load(); err != nil {
+		log.Fatalf("valve-node: load config: %v", err)
+	}
 
 	uiFS, err := fs.Sub(embeddedUI, "web/dist")
 	if err != nil {
