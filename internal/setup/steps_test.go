@@ -797,7 +797,7 @@ func TestPlan_ReturnsOrderedSteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	want := []string{"preflight", "toolchain", "install-exec", "install-beacon", "wire", "start", "handshake"}
+	want := []string{"preflight", "account", "toolchain", "install-exec", "install-beacon", "wire", "start", "handshake"}
 	if len(steps) != len(want) {
 		t.Fatalf("got %d steps, want %d", len(steps), len(want))
 	}
@@ -817,5 +817,62 @@ func TestPlan_InvalidComboErrors(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("want error for go-pulse on chain 1, got nil")
+	}
+}
+
+// ---- account ----
+
+func TestAccount_RunCreatesSystemUserIdempotently(t *testing.T) {
+	e := newFakeExecutor()
+	step := accountStep()
+	if err := step.Run(context.Background(), e, &State{Wire: testWire()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var cmd string
+	for _, c := range e.callLog() {
+		if strings.Contains(c, "useradd") {
+			cmd = c
+		}
+	}
+	if cmd == "" {
+		t.Fatalf("no useradd command issued; calls: %v", e.callLog())
+	}
+	for _, want := range []string{
+		"id -u " + catalog.ServiceUser,
+		"useradd --system --user-group",
+		"--shell /usr/sbin/nologin",
+		"--no-create-home",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("useradd command %q missing %q", cmd, want)
+		}
+	}
+}
+
+func TestAccount_RunFailsWhenUseraddFails(t *testing.T) {
+	e := newFakeExecutor().
+		script("useradd", executor.Result{ExitCode: 1, Stderr: "useradd: cannot lock /etc/passwd"})
+	step := accountStep()
+	err := step.Run(context.Background(), e, &State{Wire: testWire()})
+	if err == nil {
+		t.Fatal("want error when useradd fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot lock /etc/passwd") {
+		t.Fatalf("error %q does not surface useradd stderr", err)
+	}
+}
+
+func TestAccount_VerifyChecksUserExists(t *testing.T) {
+	e := newFakeExecutor().
+		script("id -u "+catalog.ServiceUser, executor.Result{ExitCode: 1, Stderr: "no such user"})
+	step := accountStep()
+	if err := step.Verify(context.Background(), e, &State{Wire: testWire()}); err == nil {
+		t.Fatal("want Verify error when the service user does not exist, got nil")
+	}
+
+	e = newFakeExecutor().
+		script("id -u "+catalog.ServiceUser, executor.Result{Stdout: "998\n", ExitCode: 0})
+	if err := step.Verify(context.Background(), e, &State{Wire: testWire()}); err != nil {
+		t.Fatalf("want Verify to pass when the user exists, got %v", err)
 	}
 }

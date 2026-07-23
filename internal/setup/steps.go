@@ -52,6 +52,7 @@ func Plan(w catalog.WireConfig) ([]Step, error) {
 
 	return []Step{
 		preflightStep(),
+		accountStep(),
 		toolchainStep(neededToolchains(execClient, beaconClient)),
 		installStep("install-exec", "Install execution client ("+w.ExecID+")", execClient),
 		installStep("install-beacon", "Install beacon client ("+w.BeaconID+")", beaconClient),
@@ -169,6 +170,48 @@ func ownActiveUnitPorts(ctx context.Context, e executor.Executor, w catalog.Wire
 		exempt[strconv.Itoa(w.BeaconHTTP())] = true
 	}
 	return exempt
+}
+
+// ---------------------------------------------------------------------
+// account
+// ---------------------------------------------------------------------
+
+// accountStep creates the dedicated unprivileged system account the node
+// services run as (catalog.ServiceUser). The services drop to this user
+// via the User=/Group= lines in the rendered units; setup itself still
+// runs as root (it is what performs the useradd). Home is the valve-node
+// data root purely as a bookkeeping convention — nothing reads it, so it
+// is not created here (--no-create-home) and not chain-specific.
+func accountStep() Step {
+	return Step{
+		ID:    "account",
+		Title: "Create service account (" + catalog.ServiceUser + ")",
+		Run: func(ctx context.Context, e executor.Executor, st *State) error {
+			cmd := fmt.Sprintf(
+				"id -u %[1]s >/dev/null 2>&1 || useradd --system --user-group --home-dir /var/lib/valve-node --no-create-home --shell /usr/sbin/nologin %[1]s",
+				catalog.ServiceUser,
+			)
+			res, err := e.Run(ctx, cmd, streamOpts(ctx, st, "account"))
+			if err != nil {
+				return fmt.Errorf("account: useradd: %w", err)
+			}
+			if res.ExitCode != 0 {
+				return fmt.Errorf("account: creating user %s failed (exit %d): %s",
+					catalog.ServiceUser, res.ExitCode, strings.TrimSpace(res.Stderr))
+			}
+			return nil
+		},
+		Verify: func(ctx context.Context, e executor.Executor, st *State) error {
+			res, err := e.Run(ctx, "id -u "+catalog.ServiceUser, nil)
+			if err != nil {
+				return fmt.Errorf("account: id -u %s: %w", catalog.ServiceUser, err)
+			}
+			if res.ExitCode != 0 {
+				return fmt.Errorf("account: service user %s does not exist yet", catalog.ServiceUser)
+			}
+			return nil
+		},
+	}
 }
 
 // minDiskBytesFor returns the minimum free bytes preflight requires before

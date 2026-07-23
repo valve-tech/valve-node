@@ -316,16 +316,16 @@ func TestToolchain_VerifySkipsRunWhenAlreadySatisfied(t *testing.T) {
 
 // ---- Plan wiring ----
 
-func TestPlan_InsertsToolchainStepSecond(t *testing.T) {
+func TestPlan_InsertsToolchainStepBeforeInstalls(t *testing.T) {
 	steps, err := Plan(testWire())
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	if len(steps) < 2 || steps[1].ID != "toolchain" {
+	if len(steps) < 3 || steps[2].ID != "toolchain" || steps[3].ID != "install-exec" {
 		var ids []string
 		for _, s := range steps {
 			ids = append(ids, s.ID)
 		}
-		t.Fatalf("Plan() step order = %v, want toolchain as step[1]", ids)
+		t.Fatalf("Plan() step order = %v, want toolchain as step[2], directly before install-exec", ids)
 	}
 }
