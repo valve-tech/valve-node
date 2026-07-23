@@ -229,6 +229,21 @@ func TestClearService_InvalidServiceErrors(t *testing.T) {
 	}
 }
 
+func TestClearService_UnsafeDataDirRefusesWithZeroExecutorCalls(t *testing.T) {
+	// An unsafe DataDir must be caught by clearPaths before ClearService
+	// ever touches the Executor — not even the systemctl stop should run.
+	w := testWire()
+	w.DataDir = ""
+	e := newFakeExecutor()
+
+	if err := ClearService(context.Background(), e, w, "exec"); err == nil {
+		t.Fatal("want error for an unsafe DataDir, got nil")
+	}
+	if calls := e.callLog(); len(calls) != 0 {
+		t.Fatalf("unsafe DataDir must not run ANY executor calls (not even stop); calls = %v", calls)
+	}
+}
+
 // ---- clearPaths safety ----
 
 func TestClearPaths_RefusesEmptyDataDir(t *testing.T) {
@@ -263,6 +278,17 @@ func TestClearPaths_RefusesWhenComputedPathIsRoot(t *testing.T) {
 func TestClearPaths_RefusesNoDataSubdirs(t *testing.T) {
 	if _, err := clearPaths("/mnt/reth", nil); err == nil {
 		t.Fatal("want error when the client has no known DataSubdirs")
+	}
+}
+
+func TestClearPaths_RefusesSubdirEscapingDataDir(t *testing.T) {
+	// DataDir "/mnt/reth" with subdir "../rethbackup" cleans to
+	// "/mnt/rethbackup" — a sibling directory, not anything under
+	// DataDir. The old exact-match denylist (only checking against
+	// DataDir itself, "/", or "") let this slip through; clearPaths must
+	// refuse anything that isn't structurally INSIDE DataDir.
+	if _, err := clearPaths("/mnt/reth", []string{"../rethbackup"}); err == nil {
+		t.Fatal("want error when a computed delete path escapes DataDir to a sibling directory")
 	}
 }
 
@@ -700,6 +726,17 @@ func TestBindState_DistinguishesWideLoopbackAndAbsent(t *testing.T) {
 	}
 	if got := bindState(out, 9999); got != "" {
 		t.Errorf("bindState(9999) = %q, want \"\" (not listening)", got)
+	}
+}
+
+func TestBindState_WideWinsOverLoopbackRegardlessOfOrder(t *testing.T) {
+	// A dual-bind service (loopback line listed first, wide line second
+	// for the same port) must classify as "wide" — ANY non-loopback
+	// listener on the port makes it reachable from outside the box, so
+	// first-match-wins on the loopback line was a false "safe" reading.
+	out := sslHeader() + ssLine("127.0.0.1", 8545) + ssLine("0.0.0.0", 8545)
+	if got := bindState(out, 8545); got != "wide" {
+		t.Errorf("bindState(8545) = %q, want wide (dual-bind: loopback line first, wide line second)", got)
 	}
 }
 

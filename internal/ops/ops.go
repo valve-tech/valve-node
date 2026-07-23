@@ -158,8 +158,13 @@ func ClearService(ctx context.Context, e executor.Executor, w catalog.WireConfig
 // clearPaths computes the delete path(s) for a clear operation — exactly
 // DataDir + "/" + each of subdirs — and refuses (returning an error rather
 // than any path) if DataDir is empty, if DataDir itself resolves to "/", if
-// any subdir is empty, or if any computed path resolves (via path.Clean, so
-// a trailing slash or a "." doesn't slip through) to DataDir itself or "/".
+// any subdir is empty, or if any computed path (after path.Clean, so a
+// trailing slash, a ".", or a ".." doesn't slip through) does not resolve
+// to somewhere STRICTLY INSIDE DataDir — i.e. cleanPath must have
+// cleanDataDir+"/" as a prefix. This is a structural containment check,
+// not an exact-match denylist: a subdir like "../rethbackup" cleans to a
+// sibling of DataDir (not "/" and not DataDir itself), which an exact-match
+// check would have let through.
 func clearPaths(dataDir string, subdirs []string) ([]string, error) {
 	if dataDir == "" {
 		return nil, fmt.Errorf("refusing to clear: DataDir is empty")
@@ -179,8 +184,8 @@ func clearPaths(dataDir string, subdirs []string) ([]string, error) {
 		}
 		p := dataDir + "/" + sub
 		cp := path.Clean(p)
-		if cp == cleanDataDir || cp == "/" || cp == "" {
-			return nil, fmt.Errorf("refusing to clear: computed delete path %q is unsafe", p)
+		if !strings.HasPrefix(cp, cleanDataDir+"/") {
+			return nil, fmt.Errorf("refusing to clear: computed delete path %q (%q) is not strictly inside DataDir %q", p, cp, dataDir)
 		}
 		paths = append(paths, p)
 	}
@@ -488,9 +493,14 @@ func beaconP2PPorts(beaconID string) (beaconP2P, error) {
 // bindState classifies how a port is bound based on `ss -ltn`/`ss -lun`
 // output: "wide" (0.0.0.0, *, or [::] — reachable from outside this box),
 // "loopback" (127.0.0.1 or ::1 — local only), or "" if the port isn't
-// listening at all in this output.
+// listening at all in this output. A service can dual-bind (e.g. one
+// listener on 127.0.0.1 and another on 0.0.0.0 for the same port) — ANY
+// matching line that's non-loopback makes the port reachable from outside
+// this box, so wide wins over loopback regardless of which line appears
+// first in the ss output.
 func bindState(ssOutput string, port int) string {
 	suffix := fmt.Sprintf(":%d", port)
+	sawLoopback := false
 	for _, line := range strings.Split(ssOutput, "\n") {
 		for _, f := range strings.Fields(line) {
 			if !strings.HasSuffix(f, suffix) {
@@ -499,11 +509,14 @@ func bindState(ssOutput string, port int) string {
 			addr := strings.TrimSuffix(f, suffix)
 			switch addr {
 			case "127.0.0.1", "::1", "[::1]":
-				return "loopback"
+				sawLoopback = true
 			default:
 				return "wide"
 			}
 		}
+	}
+	if sawLoopback {
+		return "loopback"
 	}
 	return ""
 }
