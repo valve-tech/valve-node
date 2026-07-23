@@ -96,7 +96,7 @@ var clients = map[string]Client{
 		PinVersion: "main",
 		Toolchain:  "rust",
 		BuildCmd: `rm -rf /tmp/build-lighthouse-pulse && ` +
-			`git clone --depth 1 https://gitlab.com/pulsechaincom/lighthouse-pulse.git /tmp/build-lighthouse-pulse && ` +
+			`git clone --depth 1 https://github.com/valve-tech/lighthouse-pulse.git /tmp/build-lighthouse-pulse && ` +
 			`cd /tmp/build-lighthouse-pulse && ` +
 			`(. "$HOME/.cargo/env" 2>/dev/null || true) && ` +
 			`cargo build --release --bin lighthouse && ` +

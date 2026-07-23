@@ -284,3 +284,34 @@ func TestRenderUnits_ErigonPulseArchiveFlags(t *testing.T) {
 		t.Errorf("erigon-pulse Archive=false should not contain --gcmode:\n%s", fullExec)
 	}
 }
+
+func TestClients_BuildCmdMatchesRepo(t *testing.T) {
+	// Assert that for EVERY client, BuildCmd contains the host+path of its own Repo field.
+	// BuildCmd's clone URL must start with Repo + ".git" or Repo (normalized).
+	for id, c := range clients {
+		id, c := id, c
+		t.Run(id, func(t *testing.T) {
+			// Extract the git clone URL from BuildCmd
+			// The pattern is: `git clone --depth 1 <URL> <target>`
+			clonePrefix := "git clone --depth 1 "
+			idx := strings.Index(c.BuildCmd, clonePrefix)
+			if idx == -1 {
+				t.Fatalf("client %q BuildCmd does not contain 'git clone --depth 1'", id)
+			}
+			startIdx := idx + len(clonePrefix)
+			endIdx := strings.Index(c.BuildCmd[startIdx:], " ")
+			if endIdx == -1 {
+				t.Fatalf("client %q BuildCmd has malformed git clone", id)
+			}
+			cloneURL := c.BuildCmd[startIdx : startIdx+endIdx]
+
+			// Normalize: Repo might end with .git or not; BuildCmd clone URL might end with .git or not
+			repoNorm := strings.TrimSuffix(c.Repo, ".git")
+			cloneURLNorm := strings.TrimSuffix(cloneURL, ".git")
+
+			if cloneURLNorm != repoNorm {
+				t.Errorf("client %q: BuildCmd clones %q but Repo is %q", id, cloneURL, c.Repo)
+			}
+		})
+	}
+}
