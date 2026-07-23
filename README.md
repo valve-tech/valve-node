@@ -42,6 +42,14 @@ directory to the service account. Existing installs migrate automatically:
 re-run setup against the target and the units are rewritten, the data
 directory re-owned, and the services restarted.
 
+v0.3 also adds **network diagnostics**: a one-click, read-only
+troubleshooting ladder (services → local RPC/API → p2p listeners →
+inbound/outbound reachability → peers → sync → known journal error
+signatures) that pinpoints why a node has low peers or stuck sync, with a
+copy-paste fix suggested for each failing check. In SSH mode it also dials
+the target's public p2p ports from your own machine, catching hosting-
+provider firewalls an on-box check can't see.
+
 ## Requirements
 
 - The **target** being set up (the box that will run the execution + beacon
