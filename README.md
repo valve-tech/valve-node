@@ -31,6 +31,17 @@ probe-backed firewall checklist against the target and only ever *suggests*
 the commands to lock it down — it never runs anything on your behalf. RPC and
 P2P ports are configurable per client instead of fixed at their defaults.
 
+## v0.3 (unreleased)
+
+v0.3 de-roots the node services: the execution and beacon clients now run
+as a dedicated unprivileged system user (`valve-node`) under hardened
+systemd units (`NoNewPrivileges`, `ProtectSystem=strict` with the data
+directory carved out, private `/tmp` and devices). Setup itself still
+requires root — it creates the user, writes units, and owns the data
+directory to the service account. Existing installs migrate automatically:
+re-run setup against the target and the units are rewritten, the data
+directory re-owned, and the services restarted.
+
 ## Requirements
 
 - The **target** being set up (the box that will run the execution + beacon
@@ -40,7 +51,9 @@ P2P ports are configurable per client instead of fixed at their defaults.
   binaries to `/usr/local/bin`. In **local mode** (setting up the same
   machine valve-node itself is running on), run valve-node as root. Preflight
   checks this (`id -u`) and fails fast with a clear message if it isn't met.
-- Node services (the execution and beacon clients) run **as root** in v0.1.
+- Node services (the execution and beacon clients) run as the dedicated
+  unprivileged `valve-node` system user, which setup creates. (In v0.1–v0.2
+  they ran as root; re-running setup migrates an existing install.)
 
 ## Quickstart
 
@@ -93,8 +106,8 @@ machine. What it sets up can be **local** (the same machine) or **remote
 over SSH**: point a target at a `host:port` + root SSH credentials and
 valve-node drives the whole install/wire/start/handshake flow on that box
 instead, so you can run valve-node on a laptop while it provisions a
-dedicated server. Both modes need root on the target (see Requirements
-above).
+dedicated server. Both modes need root on the target for setup itself (see
+Requirements above); the node services it installs run unprivileged.
 
 ## Contributing
 
