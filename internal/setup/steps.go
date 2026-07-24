@@ -606,7 +606,7 @@ func handshakeStep() Step {
 // / offending journal lines) so the caller's error text is exactly what
 // the UI shows — never a bare "handshake failed".
 func handshakeCheck(ctx context.Context, e executor.Executor, w catalog.WireConfig, opts *executor.RunOpts) error {
-	res, err := e.Run(ctx, "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:"+strconv.Itoa(w.BeaconHTTP())+"/eth/v1/node/syncing", opts)
+	res, err := e.Run(ctx, "curl -s -o /dev/null -w '%{http_code}' http://"+w.RPCBind()+":"+strconv.Itoa(w.BeaconHTTP())+"/eth/v1/node/syncing", opts)
 	if err != nil {
 		return fmt.Errorf("handshake: beacon syncing probe: %w", err)
 	}
@@ -620,7 +620,7 @@ func handshakeCheck(ctx context.Context, e executor.Executor, w catalog.WireConf
 	res, err = e.Run(ctx,
 		`curl -s -X POST -H 'Content-Type: application/json' `+
 			`--data '{"jsonrpc":"2.0","id":1,"method":"eth_syncing","params":[]}' `+
-			`http://127.0.0.1:`+strconv.Itoa(w.ExecHTTP()), opts)
+			`http://`+w.RPCBind()+`:`+strconv.Itoa(w.ExecHTTP()), opts)
 	if err != nil {
 		return fmt.Errorf("handshake: exec eth_syncing probe: %w", err)
 	}

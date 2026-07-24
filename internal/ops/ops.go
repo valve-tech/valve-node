@@ -372,8 +372,8 @@ type EndpointInfo struct {
 // returned TunnelHint when sshMode is true; it's ignored otherwise.
 func Endpoints(ctx context.Context, e executor.Executor, w catalog.WireConfig, sshMode bool, sshLogin string) (EndpointInfo, error) {
 	var ep EndpointInfo
-	ep.ExecHTTP = fmt.Sprintf("http://127.0.0.1:%d", w.ExecHTTP())
-	ep.BeaconHTTP = fmt.Sprintf("http://127.0.0.1:%d", w.BeaconHTTP())
+	ep.ExecHTTP = fmt.Sprintf("http://%s:%d", w.RPCBind(), w.ExecHTTP())
+	ep.BeaconHTTP = fmt.Sprintf("http://%s:%d", w.RPCBind(), w.BeaconHTTP())
 
 	if sshMode {
 		ep.Access = "ssh"

@@ -43,11 +43,11 @@ const (
 // 5052), rather than hardcoding the defaults — a target configured with
 // custom ports must be probed on those exact ports.
 func execRPCAddr(w catalog.WireConfig) string {
-	return fmt.Sprintf("http://127.0.0.1:%d", w.ExecHTTP())
+	return fmt.Sprintf("http://%s:%d", w.RPCBind(), w.ExecHTTP())
 }
 
 func beaconAPIAddr(w catalog.WireConfig) string {
-	return fmt.Sprintf("http://127.0.0.1:%d", w.BeaconHTTP())
+	return fmt.Sprintf("http://%s:%d", w.RPCBind(), w.BeaconHTTP())
 }
 
 // Snapshot is one point-in-time reading of a valve-node target's health.

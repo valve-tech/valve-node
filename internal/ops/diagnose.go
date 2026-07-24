@@ -156,7 +156,7 @@ func servicesItem(execActive, beaconActive bool) CheckItem {
 func execRPCItem(ctx context.Context, e executor.Executor, w catalog.WireConfig) CheckItem {
 	why := "The execution client's local JSON-RPC is how everything (the beacon client's engine calls aside) " +
 		"talks to your node — if it doesn't answer on loopback, the client is down, still starting, or misconfigured."
-	addr := fmt.Sprintf("http://127.0.0.1:%d", w.ExecHTTP())
+	addr := fmt.Sprintf("http://%s:%d", w.RPCBind(), w.ExecHTTP())
 
 	res, err := e.Run(ctx,
 		`curl -s -m 5 -X POST -H 'Content-Type: application/json' `+
@@ -186,7 +186,7 @@ func execRPCItem(ctx context.Context, e executor.Executor, w catalog.WireConfig)
 func beaconAPIItem(ctx context.Context, e executor.Executor, w catalog.WireConfig) CheckItem {
 	why := "The beacon client's local HTTP API is where sync and peer state come from — " +
 		"if it doesn't answer on loopback, the client is down, still starting, or misconfigured."
-	addr := fmt.Sprintf("http://127.0.0.1:%d", w.BeaconHTTP())
+	addr := fmt.Sprintf("http://%s:%d", w.RPCBind(), w.BeaconHTTP())
 
 	res, err := e.Run(ctx, "curl -s -m 5 -o /dev/null -w '%{http_code}' "+addr+"/eth/v1/node/version", nil)
 	if err == nil && res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "200" {
@@ -272,7 +272,7 @@ func outboundItem(ctx context.Context, e executor.Executor, checkpointURL string
 func execPeersItem(ctx context.Context, e executor.Executor, w catalog.WireConfig) CheckItem {
 	why := "Peer count is the single clearest signal of p2p health: 0 peers means the node can't sync at all, " +
 		"and a persistently low count usually means the p2p port isn't reachable from the internet."
-	addr := fmt.Sprintf("http://127.0.0.1:%d", w.ExecHTTP())
+	addr := fmt.Sprintf("http://%s:%d", w.RPCBind(), w.ExecHTTP())
 
 	res, err := e.Run(ctx,
 		`curl -s -m 5 -X POST -H 'Content-Type: application/json' `+
@@ -292,7 +292,7 @@ func execPeersItem(ctx context.Context, e executor.Executor, w catalog.WireConfi
 func beaconPeersItem(ctx context.Context, e executor.Executor, w catalog.WireConfig) CheckItem {
 	why := "The beacon client needs peers to follow the chain; 0 peers means it can't sync, and a low count " +
 		"usually points at an unreachable p2p port."
-	addr := fmt.Sprintf("http://127.0.0.1:%d", w.BeaconHTTP())
+	addr := fmt.Sprintf("http://%s:%d", w.RPCBind(), w.BeaconHTTP())
 
 	res, err := e.Run(ctx, "curl -s -m 5 "+addr+"/eth/v1/node/peer_count", nil)
 	if err == nil && res.ExitCode == 0 {
@@ -328,8 +328,8 @@ func syncItem(ctx context.Context, e executor.Executor, w catalog.WireConfig) Ch
 	why := "Whether each client considers itself in sync — a node that never leaves 'syncing' despite healthy " +
 		"peers usually has a stalled counterpart (beacon waiting on exec or vice versa) or is simply mid-initial-sync."
 
-	execAddr := fmt.Sprintf("http://127.0.0.1:%d", w.ExecHTTP())
-	beaconAddr := fmt.Sprintf("http://127.0.0.1:%d", w.BeaconHTTP())
+	execAddr := fmt.Sprintf("http://%s:%d", w.RPCBind(), w.ExecHTTP())
+	beaconAddr := fmt.Sprintf("http://%s:%d", w.RPCBind(), w.BeaconHTTP())
 
 	execRes, execErr := e.Run(ctx,
 		`curl -s -m 5 -X POST -H 'Content-Type: application/json' `+

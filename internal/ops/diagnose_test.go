@@ -297,3 +297,31 @@ func TestNetworkDiagnostics_UnknownChainErrors(t *testing.T) {
 		t.Fatal("want error for unknown chain id, got nil")
 	}
 }
+
+// TestNetworkDiagnostics_ProbesUseRPCBind locks in Task 2 of the bind-to-host
+// work: when the RPC is bound to a routable address (a Tailscale IP), the
+// on-box probes must target THAT address, not a hardcoded 127.0.0.1 the
+// client no longer listens on.
+func TestNetworkDiagnostics_ProbesUseRPCBind(t *testing.T) {
+	w := diagWire()
+	w.RPCBindAddr = "100.101.102.103"
+	e := healthyDiagScripts(newFakeExecutor())
+	if _, err := NetworkDiagnostics(context.Background(), e, w, DiagnoseOpts{}); err != nil {
+		t.Fatalf("NetworkDiagnostics: %v", err)
+	}
+	var sawExec, sawBeacon bool
+	for _, c := range e.callLog() {
+		if strings.Contains(c, "http://100.101.102.103:8545") {
+			sawExec = true
+		}
+		if strings.Contains(c, "http://100.101.102.103:5052") {
+			sawBeacon = true
+		}
+		if strings.Contains(c, "http://127.0.0.1:8545") || strings.Contains(c, "http://127.0.0.1:5052") {
+			t.Errorf("probe still hit loopback despite a routable RPC bind: %q", c)
+		}
+	}
+	if !sawExec || !sawBeacon {
+		t.Fatalf("expected exec+beacon probes to hit the bind address; sawExec=%v sawBeacon=%v", sawExec, sawBeacon)
+	}
+}
