@@ -780,3 +780,58 @@ func TestRenderUnits_PrivilegedPortGrantsNetBindCap(t *testing.T) {
 		t.Errorf("beacon unit with port 1023 missing AmbientCapabilities:\n%s", beaconUnit)
 	}
 }
+
+func TestRenderUnits_RPCBindAddr(t *testing.T) {
+	// Default (empty) → everything loopback, as before.
+	def := WireConfig{ChainID: 369, ExecID: "reth", BeaconID: "lighthouse-pulse", DataDir: "/var/lib/valve-node/369"}
+	execUnit, beaconUnit, err := RenderUnits(def)
+	if err != nil {
+		t.Fatalf("RenderUnits(default): %v", err)
+	}
+	if !strings.Contains(execUnit, "--http.addr 127.0.0.1") {
+		t.Errorf("default exec bind should be loopback:\n%s", execUnit)
+	}
+	if !strings.Contains(beaconUnit, "--http-address 127.0.0.1") {
+		t.Errorf("default beacon bind should be loopback:\n%s", beaconUnit)
+	}
+
+	// Custom bind (a Tailscale-style IP) → HTTP flags bind to it, but the
+	// engine API and prysm's rpc-host stay loopback.
+	const addr = "100.101.102.103"
+	for _, tc := range []struct {
+		exec, beacon string
+	}{
+		{"reth", "lighthouse-pulse"},
+		{"go-pulse", "prysm-pulse"},
+		{"erigon-pulse", "lighthouse-pulse"},
+	} {
+		w := WireConfig{ChainID: 369, ExecID: tc.exec, BeaconID: tc.beacon,
+			DataDir: "/var/lib/valve-node/369", RPCBindAddr: addr}
+		eu, bu, err := RenderUnits(w)
+		if err != nil {
+			t.Fatalf("RenderUnits(%s/%s): %v", tc.exec, tc.beacon, err)
+		}
+		if !strings.Contains(eu, "--http.addr "+addr) {
+			t.Errorf("%s exec should bind http to %s:\n%s", tc.exec, addr, eu)
+		}
+		if !strings.Contains(eu, "--authrpc.addr 127.0.0.1") {
+			t.Errorf("%s engine API must stay loopback:\n%s", tc.exec, eu)
+		}
+		if strings.Contains(eu, "--authrpc.addr "+addr) {
+			t.Errorf("%s engine API must NOT bind to %s:\n%s", tc.exec, addr, eu)
+		}
+		switch tc.beacon {
+		case "lighthouse-pulse":
+			if !strings.Contains(bu, "--http-address "+addr) {
+				t.Errorf("lighthouse should bind http-address to %s:\n%s", addr, bu)
+			}
+		case "prysm-pulse":
+			if !strings.Contains(bu, "--grpc-gateway-host="+addr) {
+				t.Errorf("prysm should bind grpc-gateway-host to %s:\n%s", addr, bu)
+			}
+			if !strings.Contains(bu, "--rpc-host=127.0.0.1") {
+				t.Errorf("prysm rpc-host must stay loopback:\n%s", bu)
+			}
+		}
+	}
+}

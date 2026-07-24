@@ -24,6 +24,15 @@ type WireConfig struct {
 	ExecHTTPPort   int // default 8545
 	BeaconHTTPPort int // default 5052
 	ExecP2PPort    int // default 30303
+
+	// RPCBindAddr is the host address the execution and beacon HTTP RPC
+	// endpoints bind to. Empty means the default (127.0.0.1, loopback-only)
+	// — resolved via RPCBind(), never read directly, so existing configs
+	// keep binding to loopback unchanged. Set it to a routable address
+	// (e.g. the node's Tailscale IP) to reach the RPC from another machine.
+	// The engine API (authrpc, 8551) and prysm's native rpc-host always
+	// stay loopback regardless — they are never exposed.
+	RPCBindAddr string
 }
 
 // Default ports, applied whenever the corresponding WireConfig field is
@@ -59,6 +68,18 @@ func (w WireConfig) ExecP2P() int {
 		return defaultExecP2PPort
 	}
 	return w.ExecP2PPort
+}
+
+// RPCBind returns the host address the exec/beacon HTTP RPC binds to,
+// resolving the empty value to the loopback default (127.0.0.1). This is
+// also the address valve-node's own on-box probes (monitor, diagnostics,
+// setup handshake) must target — a client bound to a single non-loopback
+// address no longer answers on 127.0.0.1.
+func (w WireConfig) RPCBind() string {
+	if w.RPCBindAddr == "" {
+		return "127.0.0.1"
+	}
+	return w.RPCBindAddr
 }
 
 // engineEndpoint is the local engine-API (JSON-RPC over HTTP, JWT-authed)
@@ -207,8 +228,8 @@ func execCommand(w WireConfig) (string, error) {
 			return "", fmt.Errorf("catalog: no reth --chain mapping for chain id %d", w.ChainID)
 		}
 		cmd := fmt.Sprintf(
-			"reth node --chain %s --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %d --port %d",
-			chain, w.DataDir, w.JWTPath, w.ExecHTTP(), w.ExecP2P(),
+			"reth node --chain %s --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr %s --http.port %d --port %d",
+			chain, w.DataDir, w.JWTPath, w.RPCBind(), w.ExecHTTP(), w.ExecP2P(),
 		)
 		if !w.Archive {
 			cmd += " --full"
@@ -217,8 +238,8 @@ func execCommand(w WireConfig) (string, error) {
 
 	case "geth":
 		cmd := fmt.Sprintf(
-			"geth --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %d --port %d",
-			w.DataDir, w.JWTPath, w.ExecHTTP(), w.ExecP2P(),
+			"geth --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr %s --http.port %d --port %d",
+			w.DataDir, w.JWTPath, w.RPCBind(), w.ExecHTTP(), w.ExecP2P(),
 		)
 		if w.Archive {
 			cmd += " --gcmode archive"
@@ -231,8 +252,8 @@ func execCommand(w WireConfig) (string, error) {
 		// /usr/local/bin/go-pulse (task-4b BuildCmd), so it's invoked by
 		// that name, not geth's.
 		cmd := fmt.Sprintf(
-			"go-pulse --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %d --port %d",
-			w.DataDir, w.JWTPath, w.ExecHTTP(), w.ExecP2P(),
+			"go-pulse --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr %s --http.port %d --port %d",
+			w.DataDir, w.JWTPath, w.RPCBind(), w.ExecHTTP(), w.ExecP2P(),
 		)
 		switch w.ChainID {
 		case 369:
@@ -257,8 +278,8 @@ func execCommand(w WireConfig) (string, error) {
 			return "", fmt.Errorf("catalog: no erigon-pulse --chain mapping for chain id %d", w.ChainID)
 		}
 		cmd := fmt.Sprintf(
-			"erigon-pulse --chain %s --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr 127.0.0.1 --http.port %d --port %d",
-			chain, w.DataDir, w.JWTPath, w.ExecHTTP(), w.ExecP2P(),
+			"erigon-pulse --chain %s --datadir %s --authrpc.jwtsecret %s --authrpc.addr 127.0.0.1 --authrpc.port 8551 --http --http.addr %s --http.port %d --port %d",
+			chain, w.DataDir, w.JWTPath, w.RPCBind(), w.ExecHTTP(), w.ExecP2P(),
 		)
 		// erigon defaults to archive mode; pruning is opt-in via --prune flags.
 		// erigon-2 full-node convention is --prune=hrtc. A wrong flag fails fast
@@ -289,8 +310,8 @@ func beaconCommand(w WireConfig, net Network) (string, error) {
 		}
 		datadir := path.Join(w.DataDir, "beacon")
 		cmd := fmt.Sprintf(
-			"%s bn --network %s --datadir %s --execution-endpoint %s --execution-jwt %s --checkpoint-sync-url %s --genesis-beacon-api-url %s --http --http-address 127.0.0.1 --http-port %d",
-			w.BeaconID, network, datadir, engineEndpoint, w.JWTPath, net.CheckpointURL, net.CheckpointURL, w.BeaconHTTP(),
+			"%s bn --network %s --datadir %s --execution-endpoint %s --execution-jwt %s --checkpoint-sync-url %s --genesis-beacon-api-url %s --http --http-address %s --http-port %d",
+			w.BeaconID, network, datadir, engineEndpoint, w.JWTPath, net.CheckpointURL, net.CheckpointURL, w.RPCBind(), w.BeaconHTTP(),
 		)
 		return cmd, nil
 
@@ -299,8 +320,8 @@ func beaconCommand(w WireConfig, net Network) (string, error) {
 		// BuildCmd), not the upstream beacon-chain binary name.
 		datadir := path.Join(w.DataDir, "beacondata")
 		cmd := fmt.Sprintf(
-			"prysm-pulse --datadir=%s --execution-endpoint=%s --jwt-secret=%s --checkpoint-sync-url=%s --genesis-beacon-api-url=%s --rpc-host=127.0.0.1 --grpc-gateway-host=127.0.0.1 --grpc-gateway-port=%d",
-			datadir, engineEndpoint, w.JWTPath, net.CheckpointURL, net.CheckpointURL, w.BeaconHTTP(),
+			"prysm-pulse --datadir=%s --execution-endpoint=%s --jwt-secret=%s --checkpoint-sync-url=%s --genesis-beacon-api-url=%s --rpc-host=127.0.0.1 --grpc-gateway-host=%s --grpc-gateway-port=%d",
+			datadir, engineEndpoint, w.JWTPath, net.CheckpointURL, net.CheckpointURL, w.RPCBind(), w.BeaconHTTP(),
 		)
 		switch w.ChainID {
 		case 369:
