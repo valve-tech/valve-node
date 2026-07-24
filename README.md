@@ -54,6 +54,16 @@ shows the latest report and what triggered it. In SSH mode the ladder also
 dials the target's public p2p ports from your own machine, catching
 hosting-provider firewalls an on-box check can't see.
 
+Finally, the node's execution/beacon **RPC can bind to a host address** of
+your choice (an "RPC bind address" field in the wizard's Advanced section),
+defaulting to loopback as before. Set it to the box's **Tailscale** IP (or
+another trusted overlay address) to reach the node's RPC from your own
+machine over the tailnet — no SSH tunnel needed. The engine API stays
+loopback-only regardless, and the security checklist grades the bind
+(loopback and Tailscale pass, a LAN address warns, a public/all-interfaces
+bind fails) — remember the RPC is unauthenticated, so only ever bind it to
+a trusted, private network.
+
 ## Requirements
 
 - The **target** being set up (the box that will run the execution + beacon
