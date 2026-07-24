@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -628,6 +629,9 @@ func validateWirePorts(wire catalog.WireConfig) error {
 		if p.port < 0 || p.port > 65535 {
 			return fmt.Errorf("%s: %d is out of range (must be 0 for default, or 1-65535)", p.name, p.port)
 		}
+	}
+	if addr := wire.RPCBindAddr; addr != "" && net.ParseIP(addr) == nil {
+		return fmt.Errorf("RPCBindAddr: %q is not a valid IP address (leave empty for loopback, or set a host IP such as your Tailscale address)", addr)
 	}
 	return nil
 }

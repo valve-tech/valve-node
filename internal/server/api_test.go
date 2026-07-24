@@ -1468,3 +1468,31 @@ func TestDiagnosticsRequiresCompletedSetup(t *testing.T) {
 		t.Fatalf("status = %d, want 409, body=%s", res.StatusCode, body)
 	}
 }
+
+func TestSetupRejectsInvalidRPCBindAddr(t *testing.T) {
+	a := newAPITestServer(t)
+	res := a.do(t, "POST", "/api/targets", config.Target{ID: "local", Mode: "local"})
+	res.Body.Close()
+
+	wire := catalog.WireConfig{
+		ChainID:     369,
+		ExecID:      "reth",
+		BeaconID:    "lighthouse-pulse",
+		DataDir:     "/var/lib/valve-node/369",
+		RPCBindAddr: "not-an-ip",
+	}
+	res = a.do(t, "POST", "/api/targets/local/setup", wire)
+	if res.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 400 for a bad RPCBindAddr, body=%s", res.StatusCode, body)
+	}
+
+	// A valid IP is accepted (202).
+	wire.RPCBindAddr = "100.101.102.103"
+	res = a.do(t, "POST", "/api/targets/local/setup", wire)
+	if res.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want 202 for a valid RPCBindAddr, body=%s", res.StatusCode, body)
+	}
+	res.Body.Close()
+}
