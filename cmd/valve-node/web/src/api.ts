@@ -68,6 +68,10 @@ export interface WireConfig {
   ExecHTTPPort?: number;
   BeaconHTTPPort?: number;
   ExecP2PPort?: number;
+  // RPCBindAddr is the host the exec/beacon HTTP RPC binds to. Omitted when
+  // loopback (the default); set to a routable address (e.g. a Tailscale IP)
+  // to reach the node's RPC from another machine.
+  RPCBindAddr?: string;
 }
 
 export type TargetMode = "local" | "ssh";
@@ -120,6 +124,8 @@ export interface StartSetupRequest {
   ExecHTTPPort?: number;
   BeaconHTTPPort?: number;
   ExecP2PPort?: number;
+  // Only send when the operator set a non-loopback RPC bind address.
+  RPCBindAddr?: string;
 }
 
 export function startSetup(id: string, wire: StartSetupRequest): Promise<{ status: string }> {

@@ -60,6 +60,8 @@ interface State {
   execHTTPPortError: string | null;
   beaconHTTPPortError: string | null;
   execP2PPortError: string | null;
+  rpcBindAddr: string;
+  rpcBindAddrError: string | null;
   starting: boolean;
   startError: string | null;
   events: api.SetupEvent[];
@@ -85,6 +87,8 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
     execHTTPPortError: null,
     beaconHTTPPortError: null,
     execP2PPortError: null,
+    rpcBindAddr: "",
+    rpcBindAddrError: null,
     starting: false,
     startError: null,
     events: [],
@@ -115,6 +119,7 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
         if (existing.wire.ExecHTTPPort) state.execHTTPPort = String(existing.wire.ExecHTTPPort);
         if (existing.wire.BeaconHTTPPort) state.beaconHTTPPort = String(existing.wire.BeaconHTTPPort);
         if (existing.wire.ExecP2PPort) state.execP2PPort = String(existing.wire.ExecP2PPort);
+        if (existing.wire.RPCBindAddr) state.rpcBindAddr = existing.wire.RPCBindAddr;
       }
       render();
     } catch (err) {
@@ -266,9 +271,18 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
             <input id="exec-p2p-port-input" type="text" inputmode="numeric" placeholder="${DEFAULT_EXEC_P2P_PORT}" value="${escapeHtml(state.execP2PPort)}" />
           </label>
           ${state.execP2PPortError ? `<p class="error small">${escapeHtml(state.execP2PPortError)}</p>` : ""}
+          <label>
+            RPC bind address <span class="muted">(default: 127.0.0.1, loopback-only)</span>
+            <input id="rpc-bind-addr-input" type="text" inputmode="text" placeholder="127.0.0.1" value="${escapeHtml(state.rpcBindAddr)}" />
+          </label>
+          ${state.rpcBindAddrError ? `<p class="error small">${escapeHtml(state.rpcBindAddrError)}</p>` : ""}
           <p class="muted small">
             Leave any of these blank to use the default. The engine API port (8551) is fixed and
-            loopback-only — it isn't configurable.
+            loopback-only — it isn't configurable. Set the RPC bind address to this box's
+            <strong>Tailscale IP</strong> (or another trusted overlay address) to reach the node's
+            exec/beacon RPC from your own machine without an SSH tunnel. Note: the RPC is
+            <strong>unauthenticated</strong>, so anyone on that network can drive the node — only
+            bind to a trusted, private overlay, never a public address.
           </p>
         </details>
         <div class="wizard-actions">
@@ -302,6 +316,11 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
             .join(", ")}</td></tr>`
         : "";
 
+    const { addr: rpcBindAddr } = parseBindAddr(state.rpcBindAddr);
+    const rpcBindRow = rpcBindAddr
+      ? `<tr><th>RPC bind address</th><td><code>${escapeHtml(rpcBindAddr)}</code> <span class="muted">(reachable off-box — unauthenticated, keep it on a trusted overlay)</span></td></tr>`
+      : "";
+
     return `
       <section>
         <h2>4. Review</h2>
@@ -315,6 +334,7 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
             <tr><th>Data directory</th><td><code>${escapeHtml(dataDir)}</code></td></tr>
             <tr><th>JWT secret path</th><td><code>${escapeHtml(jwtPath)}</code></td></tr>
             ${portsRow}
+            ${rpcBindRow}
           </tbody>
         </table>
         <p class="muted small">
@@ -412,7 +432,7 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
         break;
       case "goto-review":
         readModeInputs();
-        if (state.execHTTPPortError || state.beaconHTTPPortError || state.execP2PPortError) {
+        if (state.execHTTPPortError || state.beaconHTTPPortError || state.execP2PPortError || state.rpcBindAddrError) {
           render();
           break;
         }
@@ -449,9 +469,31 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
     if (beaconHTTPPortInput) state.beaconHTTPPort = beaconHTTPPortInput.value.trim();
     if (execP2PPortInput) state.execP2PPort = execP2PPortInput.value.trim();
 
+    const rpcBindAddrInput = root.querySelector<HTMLInputElement>("#rpc-bind-addr-input");
+    if (rpcBindAddrInput) state.rpcBindAddr = rpcBindAddrInput.value.trim();
+
     state.execHTTPPortError = parsePort(state.execHTTPPort).error ?? null;
     state.beaconHTTPPortError = parsePort(state.beaconHTTPPort).error ?? null;
     state.execP2PPortError = parsePort(state.execP2PPort).error ?? null;
+    state.rpcBindAddrError = parseBindAddr(state.rpcBindAddr).error ?? null;
+  }
+
+  // parseBindAddr validates an optional RPC bind address: empty means the
+  // loopback default; otherwise it must be a valid IPv4/IPv6 literal (the
+  // server enforces the same with net.ParseIP). Hostnames are rejected —
+  // clients bind to addresses, not names.
+  function parseBindAddr(raw: string): { addr?: string; error?: string } {
+    if (!raw) return {};
+    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(raw);
+    if (v4) {
+      if (v4.slice(1).every((o) => Number(o) <= 255)) return { addr: raw };
+      return { error: "Each part of an IPv4 address must be 0–255." };
+    }
+    // Loose IPv6 acceptance: hex groups and colons (and an optional zone).
+    if (/^[0-9a-fA-F:]+(%[0-9a-zA-Z]+)?$/.test(raw) && raw.includes(":")) {
+      return { addr: raw };
+    }
+    return { error: "Enter a valid IP address (e.g. your Tailscale 100.x.y.z), or leave blank for loopback." };
   }
 
   // VALID_PORT_RE matches only a plain, unsigned decimal integer — no
@@ -511,6 +553,9 @@ export function renderWizard(root: HTMLElement, targetId: string): () => void {
     if (execHTTPPort !== undefined) wire.ExecHTTPPort = execHTTPPort;
     if (beaconHTTPPort !== undefined) wire.BeaconHTTPPort = beaconHTTPPort;
     if (execP2PPort !== undefined) wire.ExecP2PPort = execP2PPort;
+
+    const { addr: rpcBindAddr } = parseBindAddr(state.rpcBindAddr);
+    if (rpcBindAddr !== undefined) wire.RPCBindAddr = rpcBindAddr;
 
     try {
       await api.startSetup(state.targetId, wire);
