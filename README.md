@@ -71,11 +71,12 @@ hosting-provider firewalls an on-box check can't see.
 
 ### Download a release
 
-Grab the binary for your platform from the
+Grab the archive for your platform from the
 [latest release](https://github.com/valve-tech/valve-node/releases/latest),
-then run it:
+extract it, and run the binary:
 
 ```bash
+tar xzf valve-node_<os>_<arch>.tar.gz   # the Windows archive is a .zip
 ./valve-node
 ```
 
