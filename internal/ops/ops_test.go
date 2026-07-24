@@ -749,3 +749,43 @@ func TestBindState_DoesNotConfusePortSubstrings(t *testing.T) {
 		t.Errorf("bindState(8551) = %q, want \"\" (18551 must not match 8551)", got)
 	}
 }
+
+func TestFirewall_RPCNotPublic_TailscalePassesWithNote(t *testing.T) {
+	e := newFakeExecutor().
+		script("ss -ltn", executor.Result{Stdout: sslHeader() +
+			ssLine("100.101.102.103", 8545) + ssLine("127.0.0.1", 8551) + ssLine("100.101.102.103", 5052)}).
+		script("ss -lun", executor.Result{Stdout: sslHeader()}).
+		script("ufw status", executor.Result{Stdout: "Status: active\n", ExitCode: 0})
+
+	items, err := FirewallChecklist(context.Background(), e, firewallWire())
+	if err != nil {
+		t.Fatalf("FirewallChecklist: %v", err)
+	}
+	it := findItem(t, items, "rpc-not-public")
+	if it.Status != "pass" {
+		t.Errorf("rpc-not-public on a Tailscale bind = %q, want pass; detail=%q", it.Status, it.Detail)
+	}
+	if !strings.Contains(strings.ToLower(it.Detail), "tailscale") {
+		t.Errorf("Detail %q should note the Tailscale/overlay bind", it.Detail)
+	}
+}
+
+func TestFirewall_RPCNotPublic_LANWarns(t *testing.T) {
+	e := newFakeExecutor().
+		script("ss -ltn", executor.Result{Stdout: sslHeader() +
+			ssLine("192.168.1.10", 8545) + ssLine("127.0.0.1", 8551) + ssLine("127.0.0.1", 5052)}).
+		script("ss -lun", executor.Result{Stdout: sslHeader()}).
+		script("ufw status", executor.Result{Stdout: "Status: active\n", ExitCode: 0})
+
+	items, err := FirewallChecklist(context.Background(), e, firewallWire())
+	if err != nil {
+		t.Fatalf("FirewallChecklist: %v", err)
+	}
+	it := findItem(t, items, "rpc-not-public")
+	if it.Status != "warn" {
+		t.Errorf("rpc-not-public on a LAN bind = %q, want warn; detail=%q", it.Status, it.Detail)
+	}
+	if !strings.Contains(it.Detail, "8545") {
+		t.Errorf("Detail %q should name the LAN-bound port", it.Detail)
+	}
+}

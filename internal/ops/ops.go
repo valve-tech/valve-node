@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"path"
 	"sort"
 	"strconv"
@@ -545,6 +546,61 @@ func p2pOpenItem(id, title string, tcpPort, udpPort int, tcp, udp string) CheckI
 	}
 }
 
+// tailscaleCGNAT is the 100.64.0.0/10 carrier-grade-NAT range Tailscale
+// (and CGNAT overlays generally) assign node addresses from. A bind here
+// reaches only the operator's authenticated tailnet, not the public
+// internet — a deliberate, reasonable choice, not the alarm a 0.0.0.0 bind
+// deserves.
+var tailscaleCGNAT = func() *net.IPNet {
+	_, n, _ := net.ParseCIDR("100.64.0.0/10")
+	return n
+}()
+
+// bindAddrTier grades a single bound-address token (as it appears in ss
+// output) by how far it's exposed: "public" (0.0.0.0/all-interfaces or a
+// routable public IP), "lan" (RFC1918 private / link-local), "tailscale"
+// (100.64.0.0/10 overlay), "loopback", or "" for an unparseable token.
+func bindAddrTier(addr string) string {
+	switch addr {
+	case "0.0.0.0", "*", "::", "[::]":
+		return "public" // all interfaces — includes any public one
+	}
+	ip := net.ParseIP(strings.Trim(addr, "[]"))
+	if ip == nil {
+		return ""
+	}
+	switch {
+	case ip.IsLoopback():
+		return "loopback"
+	case tailscaleCGNAT.Contains(ip):
+		return "tailscale"
+	case ip.IsPrivate() || ip.IsLinkLocalUnicast():
+		return "lan"
+	default:
+		return "public"
+	}
+}
+
+var bindTierRank = map[string]int{"": 0, "loopback": 1, "tailscale": 2, "lan": 3, "public": 4}
+
+// portExposureTier returns the most-exposed tier any listener for port is
+// bound to in ss output (dual-binds resolve to the worst).
+func portExposureTier(ssOutput string, port int) string {
+	suffix := fmt.Sprintf(":%d", port)
+	worst := ""
+	for _, line := range strings.Split(ssOutput, "\n") {
+		for _, f := range strings.Fields(line) {
+			if !strings.HasSuffix(f, suffix) {
+				continue
+			}
+			if t := bindAddrTier(strings.TrimSuffix(f, suffix)); bindTierRank[t] > bindTierRank[worst] {
+				worst = t
+			}
+		}
+	}
+	return worst
+}
+
 func rpcNotPublicItem(w catalog.WireConfig, tcp string) CheckItem {
 	type namedPort struct {
 		name string
@@ -556,29 +612,47 @@ func rpcNotPublicItem(w catalog.WireConfig, tcp string) CheckItem {
 		{"beacon HTTP", w.BeaconHTTP()},
 	}
 
-	why := "Exec HTTP, the engine API, and beacon HTTP carry unauthenticated wallet/node control surface " +
-		"(exec HTTP included) — binding any of them to a public address lets anyone on the internet reach it."
+	why := "Exec HTTP, the engine API, and beacon HTTP carry unauthenticated wallet/node control surface — " +
+		"binding any of them to a public address lets anyone on the internet reach it. A private LAN or a " +
+		"Tailscale/overlay address is narrower, but still means anyone on that network can drive the node."
 
-	var wide []string
+	// Bucket each port by its actual exposure tier, tracking the worst.
+	byTier := map[string][]string{}
+	worst := ""
 	for _, p := range ports {
-		if bindState(tcp, p.port) == "wide" {
-			wide = append(wide, fmt.Sprintf("%s (%d)", p.name, p.port))
+		tier := portExposureTier(tcp, p.port)
+		if tier == "" || tier == "loopback" {
+			continue
+		}
+		byTier[tier] = append(byTier[tier], fmt.Sprintf("%s (%d)", p.name, p.port))
+		if bindTierRank[tier] > bindTierRank[worst] {
+			worst = tier
 		}
 	}
-	sort.Strings(wide)
+	for _, list := range byTier {
+		sort.Strings(list)
+	}
 
-	if len(wide) > 0 {
-		return CheckItem{
-			ID: "rpc-not-public", Title: "RPC/engine ports not publicly exposed", Why: why,
-			Status: "fail",
-			Detail: fmt.Sprintf("bound to a public address: %s — anyone on the internet can reach it", strings.Join(wide, ", ")),
-			Fix:    "bind the affected flag(s) back to 127.0.0.1 in the client's unit and restart the service",
+	const id, title = "rpc-not-public", "RPC/engine ports not publicly exposed"
+	switch worst {
+	case "public":
+		return CheckItem{ID: id, Title: title, Why: why, Status: "fail",
+			Detail: fmt.Sprintf("bound to a public / all-interfaces address: %s — anyone on the internet can reach it", strings.Join(byTier["public"], ", ")),
+			Fix:    "bind the affected flag(s) to 127.0.0.1 (or a specific trusted address like your Tailscale IP) in the client's unit and restart the service",
 		}
-	}
-	return CheckItem{
-		ID: "rpc-not-public", Title: "RPC/engine ports not publicly exposed", Why: why,
-		Status: "pass",
-		Detail: "exec HTTP, engine API, and beacon HTTP are all loopback-bound (or not listening)",
+	case "lan":
+		return CheckItem{ID: id, Title: title, Why: why, Status: "warn",
+			Detail: fmt.Sprintf("bound to a private LAN address: %s — reachable by anyone on your local network", strings.Join(byTier["lan"], ", ")),
+			Fix:    "if that's intended (a trusted LAN) you can ignore this; otherwise bind to 127.0.0.1 or a Tailscale address and restart the service",
+		}
+	case "tailscale":
+		return CheckItem{ID: id, Title: title, Why: why, Status: "pass",
+			Detail: fmt.Sprintf("bound to a Tailscale/overlay address: %s — reachable only on your authenticated tailnet (RPC is unauthenticated, so everyone on that tailnet can drive the node)", strings.Join(byTier["tailscale"], ", ")),
+		}
+	default:
+		return CheckItem{ID: id, Title: title, Why: why, Status: "pass",
+			Detail: "exec HTTP, engine API, and beacon HTTP are all loopback-bound (or not listening)",
+		}
 	}
 }
 
